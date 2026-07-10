@@ -39,7 +39,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
-            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut cmd, name, &mut buf);
+            let mut script = String::from_utf8_lossy(&buf).into_owned();
+            if shell == clap_complete::Shell::Zsh {
+                script = enhance_zsh(script);
+            }
+            print!("{script}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::ListSecrets => {
+            // Best-effort: print secret names for completion, silent on error.
+            if let Ok(cfg) = Config::load() {
+                for name in cfg.all_names() {
+                    println!("{name}");
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Check => {
@@ -270,4 +285,38 @@ fn exit(failed: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Patch clap's generated zsh completion to complete secret names dynamically
+/// (from `sctl __list-secrets`) instead of falling back to `_default`.
+fn enhance_zsh(mut s: String) -> String {
+    // Drop the internal helper subcommand from the top-level suggestion list.
+    s = s
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("'__list-secrets:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    s.push('\n');
+    s = s.replace(
+        "-- Secret name(s), or '\\''all'\\'':_default",
+        "-- Secret name(s), or '\\''all'\\'':_sctl_secrets",
+    );
+    s = s.replace(
+        "-- Secret name(s):_default",
+        "-- Secret name(s):_sctl_secrets",
+    );
+    let helper = "\n\
+_sctl_secrets() {\n\
+    local -a _secrets\n\
+    _secrets=(${(f)\"$(sctl __list-secrets 2>/dev/null)\"})\n\
+    _values 'secret' all $_secrets\n\
+}\n";
+    let anchor = "autoload -U is-at-least\n";
+    if let Some(pos) = s.find(anchor) {
+        let idx = pos + anchor.len();
+        s.insert_str(idx, helper);
+    } else {
+        s.push_str(helper);
+    }
+    s
 }

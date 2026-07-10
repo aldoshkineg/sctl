@@ -61,6 +61,9 @@ pub enum Command {
         /// Shell to generate for
         shell: Shell,
     },
+    /// (internal) list secret names for shell completion
+    #[command(name = "__list-secrets", hide = true)]
+    ListSecrets,
 }
 
 #[derive(Debug, Args)]
