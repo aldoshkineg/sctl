@@ -4,7 +4,15 @@
 use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
+
+/// Serialize gocryptfs-backed tests: many parallel FUSE mounts are flaky.
+static MOUNT_LOCK: Mutex<()> = Mutex::new(());
+
+fn mount_guard() -> MutexGuard<'static, ()> {
+    MOUNT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 struct Sandbox {
     dir: TempDir,
@@ -208,6 +216,7 @@ fn mount_pulls_dependencies_and_cascades() {
         eprintln!("skipping: gocryptfs/fusermount3 not installed");
         return;
     }
+    let _guard = mount_guard();
     let sb = Sandbox::new(BASE);
 
     sb.cmd().args(["init", "all"]).assert().success();
@@ -240,6 +249,7 @@ fn no_idle_shows_never() {
         eprintln!("skipping: gocryptfs/fusermount3 not installed");
         return;
     }
+    let _guard = mount_guard();
     let sb = Sandbox::new(BASE);
     sb.cmd().args(["init", "gpg"]).assert().success();
     sb.cmd()
@@ -260,6 +270,7 @@ fn shared_dependency_is_kept() {
         eprintln!("skipping: gocryptfs/fusermount3 not installed");
         return;
     }
+    let _guard = mount_guard();
     // Two independent consumers of gpg.
     let cfg = r#"
 [settings]
@@ -291,6 +302,7 @@ fn toggle_mounts_then_unmounts() {
         eprintln!("skipping: gocryptfs/fusermount3 not installed");
         return;
     }
+    let _guard = mount_guard();
     let sb = Sandbox::new(BASE);
     sb.cmd().args(["init", "gpg"]).assert().success();
 

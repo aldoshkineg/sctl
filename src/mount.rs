@@ -118,6 +118,11 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
         &secret.safe(),
         idle.as_deref().unwrap_or("none"),
     )?;
+    if secret.gpg_preset
+        && let Err(e) = crate::gpg::preset(cfg, secret)
+    {
+        eprintln!("warning: gpg preset failed: {e:#}");
+    }
     sys::run_hooks("post_mount", &secret.post_mount)?;
     Ok(())
 }

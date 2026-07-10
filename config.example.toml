@@ -21,6 +21,12 @@ path = ".ssh"
 path = ".gnupg"
 # gpg = true runs `gpgconf --kill all` around mount/unmount.
 gpg = true
+# Preload secret-key passphrases into gpg-agent after mounting, so you are not
+# prompted on every mount. Requires `allow-preset-passphrase` in the volume's
+# gpg-agent.conf. The passphrase is read from a file (default below), which
+# should live inside the encrypted volume, and is zeroed in memory after use.
+gpg_preset = true
+# gpg_passphrase_file = ".gpg-passphrase"   # relative to mountpoint, or absolute/~
 # Processes safe to kill silently when they hold the mount busy on unmount.
 auto_kill = ["gpg-agent", "keyboxd", "scdaemon"]
 

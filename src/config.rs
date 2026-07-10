@@ -30,6 +30,11 @@ struct RawSecret {
     depends: Vec<String>,
     #[serde(default)]
     gpg: bool,
+    /// Preset secret-key passphrases into gpg-agent after mounting.
+    #[serde(default)]
+    gpg_preset: bool,
+    /// Passphrase file for gpg_preset (default: `<mountpoint>/.gpg-passphrase`).
+    gpg_passphrase_file: Option<String>,
     /// Process names (comm) that may be killed silently on a busy unmount.
     #[serde(default)]
     auto_kill: Vec<String>,
@@ -53,6 +58,10 @@ pub struct Secret {
     pub idle: Option<String>,
     pub depends: Vec<String>,
     pub gpg: bool,
+    /// Preset secret-key passphrases into gpg-agent after mounting.
+    pub gpg_preset: bool,
+    /// Passphrase file for gpg_preset (default: `<mountpoint>/.gpg-passphrase`).
+    pub gpg_passphrase_file: Option<String>,
     /// Process names (comm) that may be killed silently on a busy unmount.
     pub auto_kill: Vec<String>,
     pub pre_mount: Vec<String>,
@@ -162,6 +171,8 @@ impl Config {
                     idle: r.idle,
                     depends: r.depends,
                     gpg: r.gpg,
+                    gpg_preset: r.gpg_preset,
+                    gpg_passphrase_file: r.gpg_passphrase_file,
                     auto_kill: r.auto_kill,
                     pre_mount: r.pre_mount,
                     post_mount: r.post_mount,
@@ -241,6 +252,8 @@ mod tests {
             idle: None,
             depends: vec![],
             gpg: false,
+            gpg_preset: false,
+            gpg_passphrase_file: None,
             auto_kill: vec![],
             pre_mount: vec![],
             post_mount: vec![],

@@ -202,6 +202,8 @@ mod tests {
             idle: None,
             depends: depends.iter().map(|s| s.to_string()).collect(),
             gpg: false,
+            gpg_preset: false,
+            gpg_passphrase_file: None,
             auto_kill: vec![],
             pre_mount: vec![],
             post_mount: vec![],

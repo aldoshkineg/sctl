@@ -2,6 +2,7 @@ mod check;
 mod cli;
 mod config;
 mod deps;
+mod gpg;
 mod lock;
 mod mount;
 mod notify;

@@ -87,6 +87,35 @@ When a mount is busy on `umount`:
    listed and `--force` is required.
 3. `--force` kills all holders regardless. `--lazy` detaches immediately.
 
+### gpg passphrase preloading
+
+Re-entering your gpg key passphrase after every mount is tedious (the agent is
+restarted on mount, so its cache is empty). Set `gpg_preset = true` on the
+`.gnupg` secret and sctl will, right after mounting, read the secret-key
+keygrips and preset their passphrase into gpg-agent via `gpg-preset-passphrase`.
+
+Setup:
+
+1. Enable presetting in the volume's `~/.gnupg/gpg-agent.conf`:
+   ```
+   allow-preset-passphrase
+   max-cache-ttl 86400
+   ```
+2. Put the key passphrase in a file **inside the encrypted volume** (so it only
+   exists while mounted), default `~/.gnupg/.gpg-passphrase` (mode `0600`).
+   Override the path with `gpg_passphrase_file`.
+3. Configure the secret:
+   ```toml
+   [secrets.gpg]
+   path = ".gnupg"
+   gpg = true
+   gpg_preset = true
+   # gpg_passphrase_file = ".gpg-passphrase"
+   ```
+
+The passphrase buffer is zeroed in memory after use. Preset failures are
+warnings and never abort the mount.
+
 ## Environment overrides
 
 `SCTL_CONFIG_DIR`, `SCTL_CONFIG`, `SCTL_STATE_DIR`, `SCTL_ENC_ROOT`,
