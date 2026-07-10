@@ -53,12 +53,19 @@ sctl init mail              # create container(s), migrate existing data
 sctl mount mail             # mounts gpg, pass, then mail
 sctl mount ssh gpg          # multiple at once
 sctl mount all --no-idle    # everything, no idle auto-unmount
+sctl mount mail --dry-run   # preview dependency resolution, do nothing
 sctl status                 # colored, aligned table
+sctl toggle mail            # mount if down, unmount if up (great for hotkeys)
 sctl umount mail            # smart cascade
 sctl umount all
 sctl umount mail --force    # kill any process holding it busy
+sctl umount mail --dry-run  # preview the cascade
+sctl check                  # validate config, backends, perms, dependencies
 sctl completions zsh        # shell completions (bash|zsh|fish|...)
 ```
+
+Concurrent invocations are safe: each secret is guarded by an advisory lock, so
+a second `sctl` touching the same secret fails fast instead of racing.
 
 ### `status` — `UNMOUNT IN` column
 

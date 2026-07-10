@@ -31,12 +31,13 @@ fn unescape_mountinfo(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() {
-            if let Ok(code) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
-                out.push(code as char);
-                i += 4;
-                continue;
-            }
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && let Ok(code) = u8::from_str_radix(&s[i + 1..i + 4], 8)
+        {
+            out.push(code as char);
+            i += 4;
+            continue;
         }
         out.push(bytes[i] as char);
         i += 1;
@@ -70,10 +71,10 @@ pub fn busy_pids(mnt: &Path) -> Vec<i32> {
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     for tok in text.split_whitespace() {
         let digits: String = tok.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(pid) = digits.parse::<i32>() {
-            if !pids.contains(&pid) {
-                pids.push(pid);
-            }
+        if let Ok(pid) = digits.parse::<i32>()
+            && !pids.contains(&pid)
+        {
+            pids.push(pid);
         }
     }
     pids.sort_unstable();

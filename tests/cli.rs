@@ -144,6 +144,62 @@ fn completions_generate() {
         .stdout(predicates::str::contains("#compdef sctl"));
 }
 
+#[test]
+fn check_reports_uninitialized() {
+    let sb = Sandbox::new(BASE);
+    // Backends are not initialized in the sandbox -> warnings, but exit 0.
+    sb.cmd()
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("not initialized"));
+}
+
+#[test]
+fn check_fails_on_duplicate_mountpoint() {
+    let cfg = r#"
+[settings]
+enc_root = "$ENC"
+keyfile = "$KEY"
+[secrets.a]
+path = "same"
+[secrets.b]
+path = "same"
+"#;
+    let sb = Sandbox::new(cfg);
+    sb.cmd()
+        .arg("check")
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("share mountpoint"));
+}
+
+#[test]
+fn mount_dry_run_shows_plan_and_does_nothing() {
+    let sb = Sandbox::new(BASE);
+    sb.cmd()
+        .args(["mount", "mail", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mount plan (dry-run)"))
+        .stdout(predicates::str::contains("gpg  [mount (dependency)]"))
+        .stdout(predicates::str::contains("mail  [mount]"));
+    // Nothing mounted.
+    assert!(!is_mounted(&sb.mnt(".gnupg")));
+}
+
+#[test]
+fn umount_dry_run_shows_blocked() {
+    // gpg is a dependency of mail; if mail were mounted, umount gpg is blocked.
+    // Without real mounts we can only check the plan renders for a request.
+    let sb = Sandbox::new(BASE);
+    sb.cmd()
+        .args(["umount", "gpg", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("umount plan (dry-run)"));
+}
+
 // --- lifecycle (needs gocryptfs + fusermount3) ----------------------------
 
 #[test]
@@ -227,4 +283,22 @@ depends = ["gpg"]
     assert!(is_mounted(&sb.mnt(".gnupg")));
     assert!(is_mounted(&sb.mnt(".local/share/chat")));
     sb.cmd().args(["umount", "all"]).assert().success();
+}
+
+#[test]
+fn toggle_mounts_then_unmounts() {
+    if !have("gocryptfs") || !have("fusermount3") {
+        eprintln!("skipping: gocryptfs/fusermount3 not installed");
+        return;
+    }
+    let sb = Sandbox::new(BASE);
+    sb.cmd().args(["init", "gpg"]).assert().success();
+
+    // First toggle: not mounted -> mount.
+    sb.cmd().args(["toggle", "gpg"]).assert().success();
+    assert!(is_mounted(&sb.mnt(".gnupg")));
+
+    // Second toggle: mounted -> unmount.
+    sb.cmd().args(["toggle", "gpg"]).assert().success();
+    assert!(!is_mounted(&sb.mnt(".gnupg")));
 }

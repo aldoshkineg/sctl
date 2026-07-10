@@ -40,6 +40,16 @@ pub enum Command {
         #[command(flatten)]
         opts: UmountFlags,
     },
+    /// Mount if unmounted, unmount if mounted (handy for keybindings)
+    Toggle {
+        /// Secret name(s)
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[command(flatten)]
+        opts: ToggleFlags,
+    },
+    /// Validate config, backends, permissions and dependencies
+    Check,
     /// Show mount status (state, mountpoint, idle countdown)
     Status {
         /// Also send a desktop notification with the summary
@@ -61,6 +71,9 @@ pub struct MountFlags {
     /// Send desktop notifications
     #[arg(long)]
     pub notify: bool,
+    /// Show what would happen without doing it
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -74,4 +87,26 @@ pub struct UmountFlags {
     /// Send desktop notifications
     #[arg(long)]
     pub notify: bool,
+    /// Show what would happen without doing it
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ToggleFlags {
+    /// Disable idle auto-unmount when mounting
+    #[arg(long)]
+    pub no_idle: bool,
+    /// Kill processes holding a mount busy without prompting
+    #[arg(long)]
+    pub force: bool,
+    /// Lazy unmount (detach now, clean up when free)
+    #[arg(long)]
+    pub lazy: bool,
+    /// Send desktop notifications
+    #[arg(long)]
+    pub notify: bool,
+    /// Show what would happen without doing it
+    #[arg(long)]
+    pub dry_run: bool,
 }

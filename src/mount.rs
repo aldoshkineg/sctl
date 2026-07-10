@@ -33,6 +33,7 @@ fn effective_idle(cfg: &Config, secret: &Secret, no_idle: bool) -> Option<String
 
 /// Create an encrypted container and migrate any existing cleartext into it.
 pub fn init_one(cfg: &Config, secret: &Secret) -> Result<()> {
+    let _lock = crate::lock::acquire(&cfg.state_dir, &secret.safe(), &secret.name)?;
     let enc = secret.enc_dir(&cfg.enc_root);
     let mnt = secret.mountpoint(&cfg.home);
 
@@ -71,6 +72,7 @@ pub fn init_one(cfg: &Config, secret: &Secret) -> Result<()> {
 
 /// Mount a single secret's container.
 pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
+    let _lock = crate::lock::acquire(&cfg.state_dir, &secret.safe(), &secret.name)?;
     let enc = secret.enc_dir(&cfg.enc_root);
     let mnt = secret.mountpoint(&cfg.home);
 

@@ -211,10 +211,10 @@ impl Config {
 
 /// Resolve the user's home directory (env `HOME` first for test isolation).
 pub fn home_dir() -> Result<PathBuf> {
-    if let Some(h) = env::var_os("HOME") {
-        if !h.is_empty() {
-            return Ok(PathBuf::from(h));
-        }
+    if let Some(h) = env::var_os("HOME")
+        && !h.is_empty()
+    {
+        return Ok(PathBuf::from(h));
     }
     #[allow(deprecated)]
     std::env::home_dir().context("could not determine home directory")

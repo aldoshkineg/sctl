@@ -2,7 +2,7 @@
 name = "sctl"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Config-driven gocryptfs secret mount manager with dependencies, idle auto-unmount, and desktop notifications."
 authors = ["Eugene Aldoshkin <aldoshkineg@gmail.com>"]
 license = "MIT OR Apache-2.0"

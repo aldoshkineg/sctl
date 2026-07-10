@@ -25,6 +25,7 @@ pub struct UmountOpts {
 
 /// Unmount a single secret's container.
 pub fn umount_one(cfg: &Config, secret: &Secret, opts: UmountOpts) -> Result<()> {
+    let _lock = crate::lock::acquire(&cfg.state_dir, &secret.safe(), &secret.name)?;
     let mnt = secret.mountpoint(&cfg.home);
     if !is_mounted(&mnt) {
         println!("{}: not mounted", secret.name);
