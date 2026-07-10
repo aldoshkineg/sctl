@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use zeroize::Zeroizing;
 
 /// Preset passphrases for all secret keys in the secret's gnupg home.
 /// Best-effort: individual failures are reported as warnings, not fatal.
@@ -28,38 +29,32 @@ pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
         return Ok(());
     }
 
-    let mut passphrase =
-        std::fs::read(&pf).with_context(|| format!("reading passphrase file {}", pf.display()))?;
+    // Zeroizing guarantees the buffer is wiped on drop (even on early return),
+    // using volatile writes the compiler is not allowed to elide.
+    let mut passphrase = Zeroizing::new(
+        std::fs::read(&pf).with_context(|| format!("reading passphrase file {}", pf.display()))?,
+    );
     while matches!(passphrase.last(), Some(b'\n' | b'\r')) {
         passphrase.pop();
     }
 
-    let result = (|| -> Result<usize> {
-        let keygrips = keygrips(&mnt)?;
-        if keygrips.is_empty() {
-            eprintln!(
-                "warning: gpg_preset: no secret-key keygrips found for '{}'",
-                secret.name
-            );
-            return Ok(0);
+    let keygrips = keygrips(&mnt)?;
+    if keygrips.is_empty() {
+        eprintln!(
+            "warning: gpg_preset: no secret-key keygrips found for '{}'",
+            secret.name
+        );
+        return Ok(());
+    }
+    let bin = preset_bin()?;
+    let mut count = 0;
+    for kg in &keygrips {
+        match run_preset(&bin, kg, &passphrase) {
+            Ok(()) => count += 1,
+            Err(e) => eprintln!("warning: gpg_preset failed for keygrip {kg}: {e:#}"),
         }
-        let bin = preset_bin()?;
-        let mut count = 0;
-        for kg in &keygrips {
-            match run_preset(&bin, kg, &passphrase) {
-                Ok(()) => count += 1,
-                Err(e) => eprintln!("warning: gpg_preset failed for keygrip {kg}: {e:#}"),
-            }
-        }
-        Ok(count)
-    })();
-
-    // Always zero the passphrase buffer, whatever happened.
-    for b in passphrase.iter_mut() {
-        *b = 0;
     }
 
-    let count = result?;
     if count > 0 {
         println!("gpg: preset passphrase for {count} key(s)");
     }

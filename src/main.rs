@@ -57,6 +57,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Version => {
+            println!("sctl {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Check => {
             let cfg = Config::load()?;
             Ok(exit(check::run(&cfg)))

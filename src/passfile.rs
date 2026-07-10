@@ -6,6 +6,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::NamedTempFile;
+use zeroize::Zeroizing;
 
 /// A temporary passfile that is deleted on drop.
 pub struct Passfile {
@@ -31,7 +32,9 @@ pub fn resolve(name: &str, keyfile: &Path) -> Result<Passfile> {
     } else if let Some(keyenv) = env::var_os("SCTL_KEY").filter(|k| !k.is_empty()) {
         let p = Path::new(&keyenv);
         if p.is_file() {
-            let data = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+            let data = Zeroizing::new(
+                std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
+            );
             tmp.write_all(&data)?;
         } else {
             copy_or_prompt(&mut tmp, keyfile, name)?;
@@ -46,15 +49,18 @@ pub fn resolve(name: &str, keyfile: &Path) -> Result<Passfile> {
 
 fn copy_or_prompt(tmp: &mut NamedTempFile, keyfile: &Path, name: &str) -> Result<()> {
     if keyfile.is_file() {
-        let data =
-            std::fs::read(keyfile).with_context(|| format!("reading {}", keyfile.display()))?;
+        let data = Zeroizing::new(
+            std::fs::read(keyfile).with_context(|| format!("reading {}", keyfile.display()))?,
+        );
         tmp.write_all(&data)?;
         return Ok(());
     }
-    let pw1 = rpassword::prompt_password(format!("Password for '{name}': "))
-        .context("reading password")?;
-    let pw2 = rpassword::prompt_password("Confirm: ").context("reading password")?;
-    if pw1 != pw2 {
+    let pw1 = Zeroizing::new(
+        rpassword::prompt_password(format!("Password for '{name}': "))
+            .context("reading password")?,
+    );
+    let pw2 = Zeroizing::new(rpassword::prompt_password("Confirm: ").context("reading password")?);
+    if *pw1 != *pw2 {
         bail!("passwords do not match");
     }
     tmp.write_all(pw1.as_bytes())?;

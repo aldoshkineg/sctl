@@ -1,6 +1,6 @@
 [package]
 name = "sctl"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Config-driven gocryptfs secret mount manager with dependencies, idle auto-unmount, and desktop notifications."
@@ -22,6 +22,7 @@ rpassword = "7.5.4"
 serde = { version = "1.0.228", features = ["derive"] }
 tempfile = "3.27.0"
 toml = "1.1.2"
+zeroize = "1.8.2"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

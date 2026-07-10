@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          dist="sctl-${{ github.ref_name }}-${{ matrix.target }}"
+          install -Dm755 "target/${{ matrix.target }}/release/sctl" "$dist/sctl"
+          install -Dm644 README.md "$dist/README.md"
+          install -Dm644 LICENSE-MIT "$dist/LICENSE-MIT"
+          install -Dm644 LICENSE-APACHE "$dist/LICENSE-APACHE"
+          install -Dm644 config.example.toml "$dist/config.example.toml"
+          tar -czf "$dist.tar.gz" "$dist"
+          sha256sum "$dist.tar.gz" > "$dist.tar.gz.sha256"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sctl-*.tar.gz
+            sctl-*.tar.gz.sha256
+          generate_release_notes: true

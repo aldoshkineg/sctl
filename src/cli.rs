@@ -6,10 +6,8 @@ use clap_complete::Shell;
 #[derive(Debug, Parser)]
 #[command(
     name = "sctl",
-    version,
     about = "Config-driven gocryptfs secret mount manager",
-    long_about = None,
-    propagate_version = true
+    long_about = None
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -61,6 +59,8 @@ pub enum Command {
         /// Shell to generate for
         shell: Shell,
     },
+    /// Print version information
+    Version,
     /// (internal) list secret names for shell completion
     #[command(name = "__list-secrets", hide = true)]
     ListSecrets,

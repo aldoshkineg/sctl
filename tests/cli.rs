@@ -97,7 +97,11 @@ idle = "30s"
 fn help_and_version() {
     let sb = Sandbox::new(BASE);
     sb.cmd().arg("--help").assert().success();
-    sb.cmd().arg("--version").assert().success();
+    sb.cmd()
+        .arg("version")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("sctl "));
 }
 
 #[test]
