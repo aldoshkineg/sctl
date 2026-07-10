@@ -17,9 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+          - target: x86_64-unknown-linux-musl
+            name: linux-x86_64-static
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +42,7 @@ jobs:
 
       - name: Package
         run: |
-          dist="sctl-${{ github.ref_name }}-${{ matrix.target }}"
+          dist="sctl-${{ github.ref_name }}-${{ matrix.name }}"
           install -Dm755 "target/${{ matrix.target }}/release/sctl" "$dist/sctl"
           install -Dm644 README.md "$dist/README.md"
           install -Dm644 LICENSE-MIT "$dist/LICENSE-MIT"
