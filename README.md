@@ -1,0 +1,91 @@
+# sctl
+
+A config-driven [gocryptfs](https://github.com/rfjakob/gocryptfs) secret mount
+manager. Keep sensitive directories (`~/.ssh`, `~/.gnupg`, a password store, a
+mail spool, …) encrypted at rest and mount them on demand with:
+
+- **Dependencies** — mounting `mail` can auto-mount `gpg` and `pass` first.
+- **Smart-cascade unmount** — unmounting `mail` also unmounts dependencies that
+  nothing else still needs; refuses to unmount a dependency another mount needs.
+- **Idle auto-unmount** — per-secret or global idle timeout (via `gocryptfs -idle`).
+- **Busy handling** — configurable `auto_kill` list per secret; otherwise it
+  lists the holding processes and requires `--force`.
+- **Colored status** — aligned table, mounted secrets highlighted.
+- **No secrets in `ps`** — passwords are passed via a temporary `0600` passfile.
+
+## Install
+
+```sh
+cargo install --path .
+# or
+cargo build --release && install -m755 target/release/sctl ~/.local/bin/sctl
+```
+
+Requires `gocryptfs` and `fusermount3` at runtime; `fuser` (busy detection) and
+`notify-send` (`--notify`) are optional.
+
+## Configuration
+
+Config lives at `~/.config/sctl/config.toml` (see [`config.example.toml`](config.example.toml)):
+
+```toml
+[settings]
+default_idle = "15m"
+enc_root = "~/.encrypted"
+keyfile = "~/.config/sctl/key"
+
+[secrets.gpg]
+path = ".gnupg"
+gpg = true
+auto_kill = ["gpg-agent", "keyboxd", "scdaemon"]
+
+[secrets.mail]
+path = ".local/share/mail"
+depends = ["gpg", "pass"]
+idle = "30m"
+auto_kill = ["lf", "nnn"]
+```
+
+## Usage
+
+```sh
+sctl init mail              # create container(s), migrate existing data
+sctl mount mail             # mounts gpg, pass, then mail
+sctl mount ssh gpg          # multiple at once
+sctl mount all --no-idle    # everything, no idle auto-unmount
+sctl status                 # colored, aligned table
+sctl umount mail            # smart cascade
+sctl umount all
+sctl umount mail --force    # kill any process holding it busy
+sctl completions zsh        # shell completions (bash|zsh|fish|...)
+```
+
+### `status` — `UNMOUNT IN` column
+
+| Value  | Meaning                                              |
+|--------|------------------------------------------------------|
+| `-`    | not mounted                                          |
+| `never`| mounted with idle disabled (`--no-idle`)            |
+| `?`    | mounted, but not by sctl (no state file)            |
+| `12m`  | estimated time until idle auto-unmount              |
+| `busy` | idle estimate elapsed but still mounted (activity resets the timer) |
+
+### Busy unmount policy
+
+When a mount is busy on `umount`:
+
+1. If **every** holding process is in the secret's `auto_kill` list → killed
+   silently (SIGTERM, then SIGKILL), then unmounted.
+2. If **any other** process holds it → nothing is killed; the processes are
+   listed and `--force` is required.
+3. `--force` kills all holders regardless. `--lazy` detaches immediately.
+
+## Environment overrides
+
+`SCTL_CONFIG_DIR`, `SCTL_CONFIG`, `SCTL_STATE_DIR`, `SCTL_ENC_ROOT`,
+`SCTL_KEYFILE`, `SCTL_DEFAULT_IDLE`, `SCTL_IDLE`, `SCTL_NO_IDLE`, `SCTL_KEY`,
+`CRYPT_PASS`, `SCTL_STRAY_DIR`, `SCTL_COLOR` (`always`/`never`), `NO_COLOR`.
+
+## License
+
+Licensed under either of MIT or Apache-2.0 at your option.

@@ -1,0 +1,47 @@
+# sctl config (TOML)
+#
+# Copy to ~/.config/sctl/config.toml and edit.
+
+[settings]
+# Auto-unmount idle timeout applied to all secrets (e.g. "30s", "10m", "1h").
+default_idle = "15m"
+# Directory holding the gocryptfs backends (one subdir per secret).
+enc_root = "~/.encrypted"
+# Shared passfile used to unlock containers (falls back to prompt if absent).
+keyfile = "~/.config/sctl/key"
+
+# --- Secrets ---------------------------------------------------------------
+# Each [secrets.NAME] maps a cleartext mountpoint (path, relative to $HOME) to
+# an encrypted backend at <enc_root>/NAME.
+
+[secrets.ssh]
+path = ".ssh"
+
+[secrets.gpg]
+path = ".gnupg"
+# gpg = true runs `gpgconf --kill all` around mount/unmount.
+gpg = true
+# Processes safe to kill silently when they hold the mount busy on unmount.
+auto_kill = ["gpg-agent", "keyboxd", "scdaemon"]
+
+[secrets.pass]
+path = ".password-store"
+depends = ["gpg"]
+
+[secrets.mail]
+path = ".local/share/mail"
+# Mounting mail auto-mounts its dependencies first (deps-first order).
+depends = ["gpg", "pass"]
+# Override the global idle timeout for this secret.
+idle = "30m"
+# File managers etc. that may be killed silently on a busy unmount.
+auto_kill = ["lf", "nnn"]
+# Optional lifecycle hooks (shell commands):
+# pre_mount    = ["..."]
+# post_mount   = ["..."]
+# pre_unmount  = ["..."]
+# post_unmount = ["..."]
+
+# --- Idle resolution -------------------------------------------------------
+# per-secret `idle` > env SCTL_IDLE > settings.default_idle > disabled.
+# Use `sctl mount NAME --no-idle` to disable for a single mount.
