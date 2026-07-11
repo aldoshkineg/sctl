@@ -1,14 +1,17 @@
-//! First-class gpg passphrase preloading into gpg-agent after a mount.
+//! First-class gpg secret-key preloading into gpg-agent after a mount.
 //!
 //! After the `.gnupg` container is mounted, sctl can read the secret-key
-//! keygrips and preset their passphrase into the (freshly started) gpg-agent
-//! via `gpg-preset-passphrase`, so the user is not prompted on every mount.
+//! keygrips and preset them into the (freshly started) gpg-agent via
+//! `gpg-preset-passphrase`, so the user is not prompted on every mount.
 //!
-//! The passphrase is read from a file that normally lives *inside* the
-//! encrypted volume (so it only exists while mounted) and is zeroed in memory
-//! after use.
+//! The credential is read from a stealthily-named seed file that normally
+//! lives *inside* the encrypted volume (so it only exists while mounted) and
+//! is zeroed in memory after use. Only a single line (12th from the end) is
+//! taken, and its trailing `-word` is dropped, so the file can double as
+//! ordinary notes without ever spelling out the real secret in plaintext.
 
 use crate::config::{Config, Secret, expand_tilde};
+use crate::procfs;
 use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,26 +25,21 @@ pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
     let pf = passphrase_file(cfg, secret, &mnt);
     if !pf.is_file() {
         eprintln!(
-            "warning: gpg_preset enabled for '{}' but passphrase file not found: {}",
-            secret.name,
-            pf.display()
+            "warning: gpg preset: seed file missing for '{}'",
+            secret.name
         );
         return Ok(());
     }
 
     // Zeroizing guarantees the buffer is wiped on drop (even on early return),
     // using volatile writes the compiler is not allowed to elide.
-    let mut passphrase = Zeroizing::new(
-        std::fs::read(&pf).with_context(|| format!("reading passphrase file {}", pf.display()))?,
-    );
-    while matches!(passphrase.last(), Some(b'\n' | b'\r')) {
-        passphrase.pop();
-    }
+    let raw = std::fs::read(&pf).with_context(|| format!("reading seed file {}", pf.display()))?;
+    let passphrase = extract_secret(&raw);
 
     let keygrips = keygrips(&mnt)?;
     if keygrips.is_empty() {
         eprintln!(
-            "warning: gpg_preset: no secret-key keygrips found for '{}'",
+            "warning: gpg preset: no secret keys found for '{}'",
             secret.name
         );
         return Ok(());
@@ -51,18 +49,64 @@ pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
     for kg in &keygrips {
         match run_preset(&bin, kg, &passphrase) {
             Ok(()) => count += 1,
-            Err(e) => eprintln!("warning: gpg_preset failed for keygrip {kg}: {e:#}"),
+            Err(e) => eprintln!("warning: gpg preset failed for keygrip {kg}: {e:#}"),
         }
     }
 
     if count > 0 {
-        println!("gpg: preset passphrase for {count} key(s)");
+        println!("gpg: preset for {count} key(s)");
     }
     Ok(())
 }
 
-/// Resolve the passphrase file: config value (absolute, ~, or relative to the
-/// mountpoint), defaulting to `<mnt>/.gpg-passphrase`.
+/// Derive the actual credential from a seed file.
+///
+/// The secret lives on the **12th line from the end** of the file, and the
+/// trailing `-word` is dropped. For example, a line `words-planet-plant-next`
+/// yields `words-planet-plant`. This lets the file masquerade as ordinary
+/// notes while never spelling out the real secret verbatim.
+///
+/// The returned buffer is `Zeroizing` and wiped on drop.
+fn extract_secret(raw: &[u8]) -> Zeroizing<Vec<u8>> {
+    let text = String::from_utf8_lossy(raw);
+    let lines: Vec<&str> = text.lines().collect();
+    // 1st from end = last line, so 12th from end = index len-12.
+    let idx = lines.len().saturating_sub(12);
+    let line = lines.get(idx).copied().unwrap_or("").trim();
+    // Take the last whitespace-delimited word, then drop its final `-word`.
+    let word = line.split_whitespace().last().unwrap_or("");
+    let secret = match word.rfind('-') {
+        Some(i) => &word[..i],
+        None => word,
+    };
+    Zeroizing::new(secret.as_bytes().to_vec())
+}
+
+/// Re-preset passphrases for every currently-mounted secret that has
+/// `gpg_preset` enabled.
+///
+/// Mounting a `gpg` secret kills the gpg-agent (`gpgconf --kill all`), which
+/// wipes any passphrases preset for *other* already-mounted gpg volumes. After
+/// such a restart we re-apply the preset for all mounted gpg secrets, so the
+/// user is not prompted again for volumes they mounted earlier in the session.
+pub fn preset_all(cfg: &Config) -> Result<()> {
+    for secret in cfg.secrets.values() {
+        if !secret.gpg_preset {
+            continue;
+        }
+        let mnt = secret.mountpoint(&cfg.home);
+        if !procfs::is_mounted(&mnt) {
+            continue;
+        }
+        if let Err(e) = preset(cfg, secret) {
+            eprintln!("warning: gpg preset failed for '{}': {e:#}", secret.name);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the seed file: config value (absolute, ~, or relative to the
+/// mountpoint), defaulting to `<mnt>/.common-seed`.
 fn passphrase_file(cfg: &Config, secret: &Secret, mnt: &Path) -> PathBuf {
     match &secret.gpg_passphrase_file {
         Some(p) => {
@@ -73,7 +117,7 @@ fn passphrase_file(cfg: &Config, secret: &Secret, mnt: &Path) -> PathBuf {
                 mnt.join(p)
             }
         }
-        None => mnt.join(".gpg-passphrase"),
+        None => mnt.join(".common-seed"),
     }
 }
 

@@ -101,17 +101,24 @@ Setup:
    allow-preset-passphrase
    max-cache-ttl 86400
    ```
-2. Put the key passphrase in a file **inside the encrypted volume** (so it only
-   exists while mounted), default `~/.gnupg/.gpg-passphrase` (mode `0600`).
-   Override the path with `gpg_passphrase_file`.
+2. Put the credential in a stealthily-named **seed file inside the encrypted
+   volume** (so it only exists while mounted), default `~/.gnupg/.common-seed`
+   (mode `0600`). Override the path with `gpg_passphrase_file`. The real
+   secret is derived from the file, not stored verbatim — see below.
 3. Configure the secret:
    ```toml
    [secrets.gpg]
    path = ".gnupg"
    gpg = true
    gpg_preset = true
-   # gpg_passphrase_file = ".gpg-passphrase"
+   # gpg_passphrase_file = ".common-seed"
    ```
+
+The seed file may look like ordinary notes: only the **12th line from the
+end** is used, and its trailing `-word` is dropped. A line
+`words-planet-plant-next` thus yields the secret `words-planet-plant`. The
+buffer is zeroed in memory after use. Preset failures are warnings and never
+abort the mount.
 
 The passphrase buffer is zeroed in memory after use. Preset failures are
 warnings and never abort the mount.

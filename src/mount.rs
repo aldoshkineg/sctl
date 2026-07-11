@@ -76,15 +76,19 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
     let enc = secret.enc_dir(&cfg.enc_root);
     let mnt = secret.mountpoint(&cfg.home);
 
-    if secret.gpg {
-        sys::gpg_kill();
-    }
     sys::run_hooks("pre_mount", &secret.pre_mount)?;
 
     if is_mounted(&mnt) {
         println!("{}: already mounted ({})", secret.name, mnt.display());
         notify(opts.notify, &format!("{} already mounted", secret.name));
         return Ok(());
+    }
+
+    // Only (re)start gpg-agent when we are actually (re)mounting this volume.
+    // Killing it for an already-mounted gpg dependency would wipe the cached
+    // passphrases of other volumes without re-running the preset below.
+    if secret.gpg {
+        sys::gpg_kill();
     }
     if !enc.join("gocryptfs.conf").exists() {
         bail!(
@@ -118,8 +122,8 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
         &secret.safe(),
         idle.as_deref().unwrap_or("none"),
     )?;
-    if secret.gpg_preset
-        && let Err(e) = crate::gpg::preset(cfg, secret)
+    if (secret.gpg || secret.gpg_preset)
+        && let Err(e) = crate::gpg::preset_all(cfg)
     {
         eprintln!("warning: gpg preset failed: {e:#}");
     }
