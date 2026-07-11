@@ -2,12 +2,43 @@
 
 use crate::procfs::which;
 use anyhow::{Context, Result, bail};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
-/// Run `gpgconf --kill all`, ignoring failures (best-effort).
+/// Run `gpgconf --kill all`, best-effort, with a hard timeout so a wedged agent
+/// can't hang the calling operation (e.g. `sctl umount gpg`).
 pub fn gpg_kill() {
-    let _ = Command::new("gpgconf").arg("--kill").arg("all").status();
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    let mut child = match Command::new("gpgconf")
+        .arg("--kill")
+        .arg("all")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let pid = Pid::from_raw(child.id() as i32);
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {
+                if start.elapsed() >= TIMEOUT {
+                    let _ = kill(pid, Signal::SIGKILL);
+                    let _ = child.wait();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 /// Run a list of shell hook commands; abort on the first failure.

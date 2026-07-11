@@ -31,9 +31,6 @@ pub fn umount_one(cfg: &Config, secret: &Secret, opts: UmountOpts) -> Result<()>
         println!("{}: not mounted", secret.name);
         return Ok(());
     }
-    if secret.gpg {
-        sys::gpg_kill();
-    }
     sys::run_hooks("pre_unmount", &secret.pre_unmount)?;
 
     let pids = busy_pids(&mnt);
@@ -41,6 +38,9 @@ pub fn umount_one(cfg: &Config, secret: &Secret, opts: UmountOpts) -> Result<()>
         handle_busy(secret, &mnt, &pids, opts)?;
     }
 
+    if secret.gpg {
+        sys::gpg_kill();
+    }
     sys::fuse_unmount(&mnt, opts.lazy)?;
     println!("unmounted: {}", secret.name);
     notify(opts.notify, &format!("Unmounted {}", secret.name));
