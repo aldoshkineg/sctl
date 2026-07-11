@@ -17,12 +17,14 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Create encrypted container(s) and migrate existing data
+    #[command(visible_alias = "in")]
     Init {
         /// Secret name(s), or 'all'
         #[arg(required = true)]
         names: Vec<String>,
     },
     /// Mount secret(s), pulling in dependencies (use 'all' for everything)
+    #[command(visible_alias = "mo")]
     Mount {
         /// Secret name(s), or 'all'
         #[arg(required = true)]
@@ -31,6 +33,7 @@ pub enum Command {
         opts: MountFlags,
     },
     /// Unmount secret(s) with smart dependency cascade (use 'all')
+    #[command(visible_alias = "um")]
     Umount {
         /// Secret name(s), or 'all'
         #[arg(required = true)]
@@ -39,6 +42,7 @@ pub enum Command {
         opts: UmountFlags,
     },
     /// Mount if unmounted, unmount if mounted (handy for keybindings)
+    #[command(visible_alias = "tg")]
     Toggle {
         /// Secret name(s)
         #[arg(required = true)]
@@ -47,19 +51,23 @@ pub enum Command {
         opts: ToggleFlags,
     },
     /// Validate config, backends, permissions and dependencies
+    #[command(visible_alias = "ck")]
     Check,
     /// Show mount status (state, mountpoint, idle countdown)
+    #[command(visible_alias = "st")]
     Status {
         /// Also send a desktop notification with the summary
         #[arg(long)]
         notify: bool,
     },
     /// Generate shell completions
+    #[command(visible_alias = "cp")]
     Completions {
         /// Shell to generate for
         shell: Shell,
     },
     /// Print version information
+    #[command(visible_alias = "ve")]
     Version,
     /// (internal) list secret names for shell completion
     #[command(name = "__list-secrets", hide = true)]

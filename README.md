@@ -123,6 +123,44 @@ abort the mount.
 The passphrase buffer is zeroed in memory after use. Preset failures are
 warnings and never abort the mount.
 
+### zsh environment secrets (`zshenv`)
+
+A secret can hold a zsh env file that your shell sources. The file lives
+*inside* the encrypted volume, so while the volume is unmounted it does not
+exist and `.zshrc` simply skips it — secrets never leak into a shell while the
+volume is locked. Once mounted, new shells pick them up automatically.
+
+1. Declare the secret (any mount point you like):
+   ```toml
+   [secrets.zshenv]
+   path = ".zsh-sec"      # mounts ~/.zsh-sec from ~/.encrypted/.zsh_sec
+   depends = ["gpg"]      # optional: also bring up the gpg agent
+   ```
+   ```sh
+   sctl init zshenv
+   sctl mount zshenv
+   ```
+
+2. Put your exports *inside* the mounted volume (e.g. `~/.zsh-sec/env.zsh`):
+   ```zsh
+   export API_TOKEN=...
+   export DB_PASSWORD=...
+   ```
+
+3. Source it conditionally from `~/.zshrc`:
+   ```zsh
+   # sctl-managed zsh env secrets
+   ZSH_SEC=~/.zsh-sec/env.zsh
+   [[ -f $ZSH_SEC ]] && source "$ZSH_SEC"
+
+   # mount the volume (pulls gpg) and load secrets into the current shell
+   zsec() { sctl mount zshenv && [[ -f $ZSH_SEC ]] && source "$ZSH_SEC"; }
+   ```
+   With the volume unmounted, `ZSH_SEC` is absent and the `[[ -f ]]` guard
+   no-ops. After `zsec` (or opening a new terminal) the variables are exported
+   into the environment. Remount/`idle`-unmount does not retroactively clear
+   variables already exported into running shells — only new shells start clean.
+
 ## Environment overrides
 
 `SCTL_CONFIG_DIR`, `SCTL_CONFIG`, `SCTL_STATE_DIR`, `SCTL_ENC_ROOT`,

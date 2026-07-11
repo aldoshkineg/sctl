@@ -309,6 +309,11 @@ fn enhance_zsh(mut s: String) -> String {
         "-- Secret name(s):_default",
         "-- Secret name(s):_sctl_secrets",
     );
+    // A `Vec<String>` positional is emitted by clap as a zsh "rest" argument
+    // (`*::`), which stops offering options (e.g. `--notify`) once a value has
+    // been given. Demote it to a plain multiple positional (`*:`) so flags
+    // remain completable after secret names: `sctl tg ssh --not` -> `--notify`.
+    s = s.replace("'*::names", "'*:names");
     let helper = "\n\
 _sctl_secrets() {\n\
     local -a _secrets\n\
