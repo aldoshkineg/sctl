@@ -13,6 +13,7 @@ mod status;
 mod sys;
 mod table;
 mod umount;
+mod watch;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -20,6 +21,8 @@ use cli::{Cli, Command};
 use config::Config;
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -59,6 +62,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Version => {
             println!("sctl {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Watch { once } => {
+            let cfg = Config::load()?;
+            if once {
+                watch::one_pass(&cfg)?;
+            } else {
+                // Singleton: only one resident watcher may run at a time.
+                match crate::lock::acquire(&cfg.state_dir, "watch", "watch") {
+                    Ok(_lock) => watch::run(&cfg)?,
+                    Err(_) => { /* another watcher already running */ }
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Check => {
@@ -177,7 +193,37 @@ fn do_mount(cfg: &Config, requested: &[String], opts: mount::MountOpts) -> Resul
             failed = true;
         }
     }
+    // Fork the resident watcher (singleton) if any secret opts into kill_busy.
+    // A mount invoked with `--no-idle` opted out of all automatic unmounting,
+    // so the watcher must not be launched for it.
+    spawn_watcher_if_needed(cfg, opts.no_idle);
     Ok(failed)
+}
+
+/// Fork a detached `sctl watch` (singleton) when any secret enables `kill_busy`
+/// and the mount was not `--no-idle`. The watcher self-exits when nothing is
+/// left to watch and a later `mount` respawns it; the singleton lock prevents
+/// duplicates.
+fn spawn_watcher_if_needed(cfg: &Config, no_idle: bool) {
+    if no_idle {
+        return;
+    }
+    if !cfg.secrets.values().any(|s| s.kill_busy) {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("watch")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // Move into its own process group so the daemon survives the parent
+        // mount command being interrupted (SIGINT to the foreground group no
+        // longer reaches it). It still self-exits when nothing is mounted.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let _ = cmd.spawn();
+    }
 }
 
 fn do_umount(

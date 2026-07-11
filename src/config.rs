@@ -38,6 +38,13 @@ struct RawSecret {
     /// Process names (comm) that may be killed silently on a busy unmount.
     #[serde(default)]
     auto_kill: Vec<String>,
+    /// Force-unmount this secret if it stays `busy` longer than
+    /// `kill_busy_after` (watcher daemon only).
+    #[serde(default)]
+    kill_busy: Option<bool>,
+    /// Busy timeout before the watcher force-unmounts (e.g. "10m").
+    #[serde(default)]
+    kill_busy_after: Option<String>,
     #[serde(default)]
     pre_mount: Vec<String>,
     #[serde(default)]
@@ -64,6 +71,10 @@ pub struct Secret {
     pub gpg_passphrase_file: Option<String>,
     /// Process names (comm) that may be killed silently on a busy unmount.
     pub auto_kill: Vec<String>,
+    /// Force-unmount if stuck busy longer than `kill_busy_after` (watcher).
+    pub kill_busy: bool,
+    /// Busy timeout before force-unmount (watcher); defaults to 10m.
+    pub kill_busy_after: Option<String>,
     pub pre_mount: Vec<String>,
     pub post_mount: Vec<String>,
     pub pre_unmount: Vec<String>,
@@ -174,6 +185,8 @@ impl Config {
                     gpg_preset: r.gpg_preset,
                     gpg_passphrase_file: r.gpg_passphrase_file,
                     auto_kill: r.auto_kill,
+                    kill_busy: r.kill_busy.unwrap_or(false),
+                    kill_busy_after: r.kill_busy_after,
                     pre_mount: r.pre_mount,
                     post_mount: r.post_mount,
                     pre_unmount: r.pre_unmount,
@@ -255,6 +268,8 @@ mod tests {
             gpg_preset: false,
             gpg_passphrase_file: None,
             auto_kill: vec![],
+            kill_busy: false,
+            kill_busy_after: None,
             pre_mount: vec![],
             post_mount: vec![],
             pre_unmount: vec![],

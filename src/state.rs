@@ -35,7 +35,7 @@ pub fn format_remaining(secs: i64) -> String {
     }
 }
 
-fn now_secs() -> i64 {
+pub fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -52,6 +52,34 @@ pub fn persist(state_dir: &Path, safe: &str, idle: &str) -> std::io::Result<()> 
 /// Remove a persisted idle-state file (ignore if absent).
 pub fn clear(state_dir: &Path, safe: &str) {
     let _ = std::fs::remove_file(state_dir.join(safe));
+}
+
+/// Record that `safe` first became busy now (epoch seconds).
+pub fn mark_busy(state_dir: &Path, safe: &str, epoch: i64) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    std::fs::write(state_dir.join(format!("{safe}.busy")), format!("{epoch}\n"))
+}
+
+/// Epoch when `safe` first became busy, if recorded.
+pub fn busy_since(state_dir: &Path, safe: &str) -> Option<i64> {
+    let raw = std::fs::read_to_string(state_dir.join(format!("{safe}.busy"))).ok()?;
+    raw.trim().parse::<i64>().ok()
+}
+
+/// Forget a recorded busy state (ignore if absent).
+pub fn clear_busy(state_dir: &Path, safe: &str) {
+    let _ = std::fs::remove_file(state_dir.join(format!("{safe}.busy")));
+}
+
+/// True if `safe` was mounted with idle disabled (i.e. `--no-idle` or
+/// `SCTL_NO_IDLE`). Such a secret opted out of all automatic unmounting,
+/// including the busy watcher.
+pub fn idle_disabled(state_dir: &Path, safe: &str) -> bool {
+    let raw = match std::fs::read_to_string(state_dir.join(safe)) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    raw.split_whitespace().nth(1) == Some("none")
 }
 
 /// Countdown status shown in the `UNMOUNT IN` column.
@@ -132,5 +160,15 @@ mod tests {
         assert_eq!(format_remaining(30), "30s");
         assert_eq!(format_remaining(600), "10m");
         assert_eq!(format_remaining(3720), "1h2m");
+    }
+
+    #[test]
+    fn idle_disabled_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!idle_disabled(dir.path(), "gpg"));
+        persist(dir.path(), "gpg", "none").unwrap();
+        assert!(idle_disabled(dir.path(), "gpg"));
+        persist(dir.path(), "gpg", "5m").unwrap();
+        assert!(!idle_disabled(dir.path(), "gpg"));
     }
 }

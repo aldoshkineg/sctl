@@ -61,6 +61,8 @@ sctl umount all
 sctl umount mail --force    # kill any process holding it busy
 sctl umount mail --dry-run  # preview the cascade
 sctl check                  # validate config, backends, perms, dependencies
+sctl watch --once           # one pass: force-unmount secrets busy past threshold
+sctl watch                  # resident loop (also auto-forked on `mount`)
 sctl completions zsh        # shell completions (bash|zsh|fish|...)
 ```
 
@@ -86,6 +88,46 @@ When a mount is busy on `umount`:
 2. If **any other** process holds it → nothing is killed; the processes are
    listed and `--force` is required.
 3. `--force` kills all holders regardless. `--lazy` detaches immediately.
+
+### Busy watcher (`kill_busy`)
+
+A mounted secret can get stuck `busy` (e.g. gpg-agent keeps `~/.gnupg`
+open, or a shell's cwd is inside it) so a normal idle/unmount can never
+succeed. Mark a secret with `kill_busy` and the background **watcher**
+force-unmounts it once it has been busy longer than `kill_busy_after`:
+
+```toml
+[secrets.gpg]
+path = ".gnupg"
+gpg = true
+gpg_preset = true
+kill_busy = true
+kill_busy_after = "10m"   # optional; defaults to 10m
+```
+
+The `sctl mount` command forks a **single resident `sctl watch` daemon**
+(singleton, guarded by a lock) whenever any secret enables `kill_busy`. The
+watcher polls every 60s: for each mounted `kill_busy` secret it records when
+it first became busy, and when that exceeds `kill_busy_after` it performs a
+forced unmount (`gpg_kill` for gpg secrets, then kills the holders and
+`fusermount`). It self-exits when nothing is left to watch and is respawned
+by the next `mount`.
+
+Run it manually / from cron as a single pass instead of the resident loop:
+
+```sh
+sctl watch --once        # one pass, then exit
+sctl watch               # resident loop (same as the forked daemon)
+```
+
+Mounting a secret with `--no-idle` (or `SCTL_NO_IDLE`) opts it out of the
+watcher entirely: `sctl mount` will not fork the daemon, and `sctl watch`
+skips such volumes (their status column already shows `never`).
+
+Note: because gpg-agent normally keeps `~/.gnupg` open, a `gpg` secret
+counts as busy for its entire mounted lifetime — so `kill_busy` effectively
+force-unmounts it `kill_busy_after` after mount. Set the threshold longer
+than a typical session if you only want it reclaimed when truly stuck.
 
 ### gpg passphrase preloading
 

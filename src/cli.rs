@@ -69,6 +69,13 @@ pub enum Command {
     /// Print version information
     #[command(visible_alias = "ve")]
     Version,
+    /// Background watcher: force-unmount secrets stuck busy past kill_busy_after
+    #[command(visible_alias = "wa")]
+    Watch {
+        /// Run a single pass and exit (instead of the resident loop)
+        #[arg(long)]
+        once: bool,
+    },
     /// (internal) list secret names for shell completion
     #[command(name = "__list-secrets", hide = true)]
     ListSecrets,

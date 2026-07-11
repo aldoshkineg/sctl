@@ -27,6 +27,12 @@ gpg = true
 # should live inside the encrypted volume, and is zeroed in memory after use.
 gpg_preset = true
 # gpg_passphrase_file = ".common-seed"   # relative to mountpoint, or absolute/~
+# Force-unmount this secret if it stays `busy` (e.g. gpg-agent holds the
+# mountpoint, or a shell has cwd inside it) longer than kill_busy_after.
+# `sctl mount` forks a resident `sctl watch` daemon that polls every 60s and
+# force-unmounts past the threshold. Defaults to 10m when omitted.
+kill_busy = true
+kill_busy_after = "10m"
 # NOTE: gpg daemons (gpg-agent/keyboxd/scdaemon) are already killed by the
 # `gpg = true` restart above, so listing them in auto_kill is redundant. Use
 # auto_kill for *other* processes that may hold this mount busy (e.g. a shell
