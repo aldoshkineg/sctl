@@ -79,6 +79,23 @@ pub enum Command {
     /// (internal) list secret names for shell completion
     #[command(name = "__list-secrets", hide = true)]
     ListSecrets,
+    /// Enroll all managed secrets into the backend (TPM seals + escrow)
+    #[command(visible_alias = "inst")]
+    Install {
+        /// Restrict to these secret names (default: all managed secrets)
+        #[arg(required = false)]
+        names: Vec<String>,
+        /// Interactive mode (prompts for existing gpg key passphrases)
+        #[arg(long)]
+        interactive: bool,
+    },
+    /// Recover the secret map from the escrow container
+    #[command(visible_alias = "rc")]
+    Recovery {
+        /// Only print entries whose key starts with this prefix (e.g. "gpg:")
+        #[arg(long)]
+        filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

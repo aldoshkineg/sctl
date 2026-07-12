@@ -4,6 +4,7 @@ use crate::config::{Config, Secret};
 use crate::notify::notify;
 use crate::passfile;
 use crate::procfs::is_mounted;
+use crate::secret;
 use crate::state;
 use crate::sys;
 use anyhow::{Context, Result, bail};
@@ -104,7 +105,7 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
     std::fs::create_dir_all(&mnt)?;
 
     let idle = effective_idle(cfg, secret, opts.no_idle);
-    let pf = passfile::resolve(&secret.name, &cfg.keyfile)?;
+    let pf = resolve_gocryptfs_passfile(cfg, secret)?;
     sys::gocryptfs_mount(&enc, &mnt, pf.path(), idle.as_deref())?;
 
     let tag = match &idle {
@@ -135,6 +136,25 @@ fn dir_nonempty(p: &Path) -> bool {
     std::fs::read_dir(p)
         .map(|mut it| it.next().is_some())
         .unwrap_or(false)
+}
+
+/// Resolve the gocryptfs passfile for a mount.
+///
+/// In backend mode (`secret_backend` set) the shared key `G` is read from the
+/// backend via `secret::resolve_secret` (zero input from the user). Otherwise
+/// the legacy plaintext `keyfile` is used.
+fn resolve_gocryptfs_passfile(cfg: &Config, secret: &Secret) -> Result<passfile::Passfile> {
+    if cfg.secret_backend.is_some() {
+        let g = secret::resolve_secret(cfg, "gocryptfs", "__shared__").with_context(|| {
+            format!(
+                "resolving gocryptfs key for '{}' from the secret backend \
+                 (run `sctl install` first)",
+                secret.name
+            )
+        })?;
+        return passfile::from_bytes(&g);
+    }
+    passfile::resolve(&secret.name, &cfg.keyfile)
 }
 
 fn migrate_into(src: &Path, dst: &Path) -> Result<()> {

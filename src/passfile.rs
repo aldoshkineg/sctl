@@ -47,6 +47,16 @@ pub fn resolve(name: &str, keyfile: &Path) -> Result<Passfile> {
     Ok(Passfile { inner: tmp })
 }
 
+/// Write already-resolved secret bytes to a fresh 0600 temp passfile (used by
+/// the secret backend path: `secret::resolve_secret` -> gocryptfs passfile).
+pub fn from_bytes(data: &[u8]) -> Result<Passfile> {
+    let mut tmp = NamedTempFile::new().context("creating temp passfile")?;
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))?;
+    tmp.write_all(data)?;
+    tmp.flush()?;
+    Ok(Passfile { inner: tmp })
+}
+
 fn copy_or_prompt(tmp: &mut NamedTempFile, keyfile: &Path, name: &str) -> Result<()> {
     if keyfile.is_file() {
         let data = Zeroizing::new(

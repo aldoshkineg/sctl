@@ -203,7 +203,7 @@ mod tests {
             depends: depends.iter().map(|s| s.to_string()).collect(),
             gpg: false,
             gpg_preset: false,
-            gpg_passphrase_file: None,
+            tpm_gpg: false,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,
@@ -226,6 +226,10 @@ mod tests {
             enc_root: PathBuf::from("/e"),
             keyfile: PathBuf::from("/c/key"),
             default_idle: None,
+            secret_backend: None,
+            escrow_file: PathBuf::from("/c/sctl-escrow.age"),
+            master_passphrase_file: None,
+            tpm_pcr: false,
             secrets: m,
         }
     }

@@ -6,6 +6,26 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// Global secret backend selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretBackend {
+    /// Secrets unsealed from the machine's TPM (zero input); escrow present
+    /// for recovery.
+    Tpm,
+    /// Secrets decrypted from the escrow file via the master passphrase.
+    Escrow,
+}
+
+impl SecretBackend {
+    fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tpm" => Ok(Self::Tpm),
+            "escrow" => Ok(Self::Escrow),
+            other => bail!("unknown secret_backend '{other}' (expected 'tpm' or 'escrow')"),
+        }
+    }
+}
+
 /// Raw TOML shape.
 #[derive(Debug, Deserialize)]
 struct RawConfig {
@@ -20,6 +40,15 @@ struct RawSettings {
     default_idle: Option<String>,
     enc_root: Option<String>,
     keyfile: Option<String>,
+    /// Global secret backend: "tpm" | "escrow". Unset = legacy (plaintext
+    /// keyfile + manual gpg entry).
+    secret_backend: Option<String>,
+    /// Encrypted escrow container (age/scrypt) holding the full secret map.
+    escrow_file: Option<String>,
+    /// Master passphrase file (emergency only); also env `SCTL_MASTER_PASS`.
+    master_passphrase_file: Option<String>,
+    /// Bind TPM seals to PCR 7 (secure-boot). Default false.
+    tpm_pcr: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,8 +62,9 @@ struct RawSecret {
     /// Preset secret-key passphrases into gpg-agent after mounting.
     #[serde(default)]
     gpg_preset: bool,
-    /// Passphrase file for gpg_preset (default: `<mountpoint>/.gpg-passphrase`).
-    gpg_passphrase_file: Option<String>,
+    /// Manage this gpg home's key passphrases through the secret backend.
+    #[serde(default)]
+    tpm_gpg: bool,
     /// Process names (comm) that may be killed silently on a busy unmount.
     #[serde(default)]
     auto_kill: Vec<String>,
@@ -67,8 +97,8 @@ pub struct Secret {
     pub gpg: bool,
     /// Preset secret-key passphrases into gpg-agent after mounting.
     pub gpg_preset: bool,
-    /// Passphrase file for gpg_preset (default: `<mountpoint>/.gpg-passphrase`).
-    pub gpg_passphrase_file: Option<String>,
+    /// Manage this gpg home's key passphrases through the secret backend.
+    pub tpm_gpg: bool,
     /// Process names (comm) that may be killed silently on a busy unmount.
     pub auto_kill: Vec<String>,
     /// Force-unmount if stuck busy longer than `kill_busy_after` (watcher).
@@ -107,6 +137,14 @@ pub struct Config {
     pub enc_root: PathBuf,
     pub keyfile: PathBuf,
     pub default_idle: Option<String>,
+    /// Global secret backend (None = legacy mode).
+    pub secret_backend: Option<SecretBackend>,
+    /// Encrypted escrow container path (age/scrypt).
+    pub escrow_file: PathBuf,
+    /// Master passphrase file path (emergency only).
+    pub master_passphrase_file: Option<PathBuf>,
+    /// Bind TPM seals to PCR 7.
+    pub tpm_pcr: bool,
     pub secrets: BTreeMap<String, Secret>,
 }
 
@@ -163,6 +201,25 @@ impl Config {
             .map(|k| expand_tilde(&k, &home))
             .unwrap_or_else(|| config_dir.join("key"));
 
+        // secret_backend: parse "tpm"/"escrow", else legacy (None).
+        let secret_backend = match raw.settings.secret_backend {
+            Some(ref s) => Some(SecretBackend::parse(s)?),
+            None => None,
+        };
+        // escrow_file: config > default (<config_dir>/sctl-escrow.age).
+        let escrow_file = raw
+            .settings
+            .escrow_file
+            .map(|e| expand_tilde(&e, &home))
+            .unwrap_or_else(|| config_dir.join("sctl-escrow.age"));
+        // master_passphrase_file: optional, expanded.
+        let master_passphrase_file = raw
+            .settings
+            .master_passphrase_file
+            .map(|p| expand_tilde(&p, &home));
+        // tpm_pcr: default false.
+        let tpm_pcr = raw.settings.tpm_pcr.unwrap_or(false);
+
         // default_idle: env > config
         let default_idle = env::var("SCTL_DEFAULT_IDLE")
             .ok()
@@ -183,7 +240,7 @@ impl Config {
                     depends: r.depends,
                     gpg: r.gpg,
                     gpg_preset: r.gpg_preset,
-                    gpg_passphrase_file: r.gpg_passphrase_file,
+                    tpm_gpg: r.tpm_gpg,
                     auto_kill: r.auto_kill,
                     kill_busy: r.kill_busy.unwrap_or(false),
                     kill_busy_after: r.kill_busy_after,
@@ -202,6 +259,10 @@ impl Config {
             enc_root,
             keyfile,
             default_idle,
+            secret_backend,
+            escrow_file,
+            master_passphrase_file,
+            tpm_pcr,
             secrets,
         };
         cfg.validate_depends()?;
@@ -266,7 +327,7 @@ mod tests {
             depends: vec![],
             gpg: false,
             gpg_preset: false,
-            gpg_passphrase_file: None,
+            tpm_gpg: false,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,

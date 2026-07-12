@@ -1,24 +1,7 @@
-mod check;
-mod cli;
-mod config;
-mod deps;
-mod gpg;
-mod lock;
-mod mount;
-mod notify;
-mod passfile;
-mod procfs;
-mod state;
-mod status;
-mod sys;
-mod table;
-mod umount;
-mod watch;
-
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command};
-use config::Config;
+use sctl::cli::{Cli, Command};
+use sctl::config::Config;
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
 #[cfg(unix)]
@@ -26,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    table::init_color(Some(std::io::stdout().is_terminal()));
+    sctl::table::init_color(Some(std::io::stdout().is_terminal()));
     let cli = Cli::parse();
     match run(cli) {
         Ok(code) => code,
@@ -67,11 +50,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Watch { once } => {
             let cfg = Config::load()?;
             if once {
-                watch::one_pass(&cfg)?;
+                sctl::watch::one_pass(&cfg)?;
             } else {
                 // Singleton: only one resident watcher may run at a time.
-                match crate::lock::acquire(&cfg.state_dir, "watch", "watch") {
-                    Ok(_lock) => watch::run(&cfg)?,
+                match sctl::lock::acquire(&cfg.state_dir, "watch", "watch") {
+                    Ok(_lock) => sctl::watch::run(&cfg)?,
                     Err(_) => { /* another watcher already running */ }
                 }
             }
@@ -79,11 +62,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Check => {
             let cfg = Config::load()?;
-            Ok(exit(check::run(&cfg)))
+            Ok(exit(sctl::check::run(&cfg)))
+        }
+        Command::Install { names, interactive } => {
+            let cfg = Config::load()?;
+            sctl::install::run(&cfg, &sctl::install::InstallOpts { names, interactive })?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Recovery { filter } => {
+            let cfg = Config::load()?;
+            sctl::recovery::run(&cfg, filter.as_deref())?;
+            Ok(ExitCode::SUCCESS)
         }
         Command::Status { notify } => {
             let cfg = Config::load()?;
-            status::run(&cfg, notify);
+            sctl::status::run(&cfg, notify);
             Ok(ExitCode::SUCCESS)
         }
         Command::Init { names } => {
@@ -99,7 +92,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         continue;
                     }
                 };
-                if let Err(e) = mount::init_one(&cfg, &secret) {
+                if let Err(e) = sctl::mount::init_one(&cfg, &secret) {
                     eprintln!("error: {e:#}");
                     failed = true;
                 }
@@ -113,7 +106,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 print_mount_plan(&cfg, &requested)?;
                 return Ok(ExitCode::SUCCESS);
             }
-            let mopts = mount::MountOpts {
+            let mopts = sctl::mount::MountOpts {
                 no_idle: opts.no_idle,
                 notify: opts.notify,
             };
@@ -127,7 +120,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 print_umount_plan(&cfg, &requested, &mounted)?;
                 return Ok(ExitCode::SUCCESS);
             }
-            let uopts = umount::UmountOpts {
+            let uopts = sctl::umount::UmountOpts {
                 force: opts.force,
                 lazy: opts.lazy,
                 notify: opts.notify,
@@ -164,14 +157,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
             let mut failed = false;
             if !to_mount.is_empty() {
-                let mopts = mount::MountOpts {
+                let mopts = sctl::mount::MountOpts {
                     no_idle: opts.no_idle,
                     notify: opts.notify,
                 };
                 failed |= do_mount(&cfg, &to_mount, mopts)?;
             }
             if !to_umount.is_empty() {
-                let uopts = umount::UmountOpts {
+                let uopts = sctl::umount::UmountOpts {
                     force: opts.force,
                     lazy: opts.lazy,
                     notify: opts.notify,
@@ -183,12 +176,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-fn do_mount(cfg: &Config, requested: &[String], opts: mount::MountOpts) -> Result<bool> {
-    let order = deps::mount_order(cfg, requested)?;
+fn do_mount(cfg: &Config, requested: &[String], opts: sctl::mount::MountOpts) -> Result<bool> {
+    let order = sctl::deps::mount_order(cfg, requested)?;
     let mut failed = false;
     for name in order {
         let secret = cfg.get(&name)?.clone();
-        if let Err(e) = mount::mount_one(cfg, &secret, opts) {
+        if let Err(e) = sctl::mount::mount_one(cfg, &secret, opts) {
             eprintln!("error: {e:#}");
             failed = true;
         }
@@ -230,9 +223,9 @@ fn do_umount(
     cfg: &Config,
     requested: &[String],
     mounted: &BTreeSet<String>,
-    opts: umount::UmountOpts,
+    opts: sctl::umount::UmountOpts,
 ) -> Result<bool> {
-    let plan = deps::umount_plan(cfg, requested, mounted)?;
+    let plan = sctl::deps::umount_plan(cfg, requested, mounted)?;
     let mut failed = false;
     for (blocked, blockers) in &plan.blocked {
         eprintln!(
@@ -243,7 +236,7 @@ fn do_umount(
     }
     for name in plan.order {
         let secret = cfg.get(&name)?.clone();
-        if let Err(e) = umount::umount_one(cfg, &secret, opts) {
+        if let Err(e) = sctl::umount::umount_one(cfg, &secret, opts) {
             eprintln!("error: {e:#}");
             failed = true;
         }
@@ -252,7 +245,7 @@ fn do_umount(
 }
 
 fn print_mount_plan(cfg: &Config, requested: &[String]) -> Result<()> {
-    let order = deps::mount_order(cfg, requested)?;
+    let order = sctl::deps::mount_order(cfg, requested)?;
     let mounted = mounted_set(cfg);
     let reqset: BTreeSet<&String> = requested.iter().collect();
     println!("mount plan (dry-run):");
@@ -270,7 +263,7 @@ fn print_mount_plan(cfg: &Config, requested: &[String]) -> Result<()> {
 }
 
 fn print_umount_plan(cfg: &Config, requested: &[String], mounted: &BTreeSet<String>) -> Result<()> {
-    let plan = deps::umount_plan(cfg, requested, mounted)?;
+    let plan = sctl::deps::umount_plan(cfg, requested, mounted)?;
     let reqset: BTreeSet<&String> = requested.iter().collect();
     println!("umount plan (dry-run):");
     for (blocked, blockers) in &plan.blocked {
@@ -324,7 +317,7 @@ fn expand_all(cfg: &Config, names: &[String]) -> Vec<String> {
 fn mounted_set(cfg: &Config) -> BTreeSet<String> {
     cfg.secrets
         .values()
-        .filter(|s| procfs::is_mounted(&s.mountpoint(&cfg.home)))
+        .filter(|s| sctl::procfs::is_mounted(&s.mountpoint(&cfg.home)))
         .map(|s| s.name.clone())
         .collect()
 }

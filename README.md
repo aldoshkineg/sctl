@@ -46,6 +46,65 @@ idle = "30m"
 auto_kill = ["lf", "nnn"]
 ```
 
+## Secret backend (TPM + escrow)
+
+`sctl` can manage its secrets (the shared gocryptfs key `G` and per-gpg-key
+passphrases) through a hardware/escrow backend instead of a plaintext keyfile.
+This is governed by the global `secret_backend` setting:
+
+- **`tpm`** — secrets are sealed into the machine's TPM (zero input on mount)
+  and mirrored into an encrypted *escrow* blob for recovery.
+- **`escrow`** — no TPM; secrets are decrypted from the escrow blob using a
+  master passphrase (env `SCTL_MASTER_PASS`, `master_passphrase_file`, or a
+  prompt).
+- **unset (legacy)** — gocryptfs uses the plaintext `keyfile`; gpg is entered
+  manually.
+
+```toml
+[settings]
+secret_backend = "tpm"                       # "tpm" | "escrow" | (unset = legacy)
+escrow_file    = "~/.config/sctl/sctl-escrow.age"
+# master_passphrase_file = "~/.config/sctl/master.pass"   # emergency only
+# tpm_pcr        = false                    # bind seals to PCR 7 (secure-boot)
+
+[secrets.gpg]
+path   = ".gnupg"
+gpg    = true
+gpg_preset = true
+tpm_gpg = true                              # manage this home's keys via backend
+```
+
+### `sctl install` — the single writer
+
+Enrolls every managed secret into the backend in one atomic, in-memory pass:
+adopts the shared gocryptfs key `G` from the existing `keyfile`, collects each
+`tpm_gpg` gpg home's key passphrase, seals every entry into the TPM (tpm
+backend) **and** writes the age/scrypt escrow blob atomically. Run it once on
+each machine:
+
+```sh
+SCTL_MASTER_PASS=... sctl install
+```
+
+### `sctl recovery`
+
+Decrypts the escrow blob with the master passphrase and prints the **entire**
+secret map to stdout (base64). Works on any machine, no TPM required — this is
+how you recover access if the hardware is lost. Optional prefix filter
+(e.g. `sctl recovery gpg:`):
+
+```sh
+SCTL_MASTER_PASS=... sctl recovery
+```
+
+### `sctl check`
+
+Validates the backend: for `tpm` it checks `tpm2-tools`, `/dev/tpmrm0`, the
+`tss` group, and per-secret TPM blobs; for `escrow` it checks the file and runs
+a decrypt self-test. It also runs the **desync detector** — if both TPM blobs
+and the escrow blob exist, it unseals both and compares them, failing loudly if
+they disagree (re-run `sctl install` to resync).
+
 ## Usage
 
 ```sh
@@ -133,37 +192,34 @@ than a typical session if you only want it reclaimed when truly stuck.
 
 Re-entering your gpg key passphrase after every mount is tedious (the agent is
 restarted on mount, so its cache is empty). Set `gpg_preset = true` on the
-`.gnupg` secret and sctl will, right after mounting, read the secret-key
-keygrips and preset their passphrase into gpg-agent via `gpg-preset-passphrase`.
+`.gnupg` secret and sctl will, right after mounting, preset the secret-key
+passphrases into gpg-agent via `gpg-preset-passphrase`.
 
-Setup:
+Two modes:
+
+- **Backend mode** (`secret_backend` set + `tpm_gpg = true` on the secret):
+  the passphrases are resolved from the backend and preloaded automatically —
+  no manual entry, no seed file. Run `sctl install` once to enroll the keys.
+- **Legacy / manual mode** (no `secret_backend`): gpg-agent is restarted on
+  mount and you type the passphrase once. There is no automatic preloading.
+
+Setup for backend mode:
 
 1. Enable presetting in the volume's `~/.gnupg/gpg-agent.conf`:
    ```
    allow-preset-passphrase
    max-cache-ttl 86400
    ```
-2. Put the credential in a stealthily-named **seed file inside the encrypted
-   volume** (so it only exists while mounted), default `~/.gnupg/.common-seed`
-   (mode `0600`). Override the path with `gpg_passphrase_file`. The real
-   secret is derived from the file, not stored verbatim — see below.
-3. Configure the secret:
+2. Configure the secret:
    ```toml
    [secrets.gpg]
    path = ".gnupg"
    gpg = true
    gpg_preset = true
-   # gpg_passphrase_file = ".common-seed"
+   tpm_gpg = true
    ```
 
-The seed file may look like ordinary notes: only the **12th line from the
-end** is used, and its trailing `-word` is dropped. A line
-`words-planet-plant-next` thus yields the secret `words-planet-plant`. The
-buffer is zeroed in memory after use. Preset failures are warnings and never
-abort the mount.
-
-The passphrase buffer is zeroed in memory after use. Preset failures are
-warnings and never abort the mount.
+Preset failures are warnings and never abort the mount.
 
 ### zsh environment secrets (`zshenv`)
 
