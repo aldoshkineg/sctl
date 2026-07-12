@@ -4,6 +4,13 @@
 enterprise secret-manager (Vault-стиль): авто-разблок на «домашней» машине
 через TPM + восстановление по мастер-паролю в голове, если железо потеряно.
 
+> **⚠️ Актуальная архитектура — см. §17 (DEK-модель, v0.8.5).** Разделы §1–§13 —
+> исходная проектная спецификация. В ходе реализации модель хранения изменилась:
+> вместо отдельного TPM-блоба на каждый секрет теперь **один** запечатанный в
+> TPM ключ шифрования данных (DEK) + **один** зашифрованным им файл-карта того же
+> формата, что и escrow. §17 описывает итоговое поведение и имеет приоритет над
+> описаниями «per-key блобов» в §3/§5/§7/§8.
+
 ---
 
 ## 1. Принципы (три якоря доверия)
@@ -64,8 +71,11 @@ ssh:<abspath_ключа>           -> S   (passphrase ssh-ключа, future, pe
   карта по абсолютному пути ключа.
 
 Эскроу = ОДИН файл с этой картой (расшифровали целиком → всё в памяти →
-берём нужную запись). TPM = по отдельному блобу на каждую запись (ключённую
-по id); ансилим только запрошенные.
+берём нужную запись). TPM (v0.8.5) — тоже ОДИН файл того же формата, но
+обёрнутый случайным DEK, который запечатан в TPM: один `tpm2_unseal` достаёт
+DEK → расшифровываем весь файл-карту → всё в памяти. См. §17. (Исходно
+планировалось по TPM-блобу на каждую запись — заменено DEK-моделью из-за лимита
+TPM на размер sealed-данных ≈128 байт.)
 
 ## 4. Формат escrow-файла
 
@@ -85,29 +95,44 @@ ssh:<abspath_ключа>           -> S   (passphrase ssh-ключа, future, pe
 - `master_passphrase_file` / env `SCTL_MASTER_PASS` / интерактивный промпт
   (`rpassword`) — источник мастер-пароля. Файл — только аварийный путь.
 
-## 5. TPM-блобы
+## 5. TPM: sealed DEK + файл-карта (v0.8.5)
 
-- Хранилище: `state_dir/tpm/<id>.priv` + `<id>.pub` (рядом с прочим state
-  sctl), **вне зашифрованных томов**.
-- Создание (seal), проверено на машине (tpm2-tools 5.7, tpm2-tss 4.1.3):
+> Историческое замечание: исходно планировалось `state_dir/tpm/<id>.{priv,pub}`
+> на каждый секрет. Заменено DEK-моделью — TPM не может запечатать больше ≈128
+> байт (проверено: 128 OK, 256 FAIL), а полная карта больше. Актуально — §17.
+
+- **Хранилище (вне зашифрованных томов):**
+  - `state_dir/tpm/dek.priv` + `dek.pub` — DEK (32 случайных байта), запечатанный
+    в TPM. Единственный sealed-объект. Имена непрозрачны: fingerprint'ов/имён
+    ключей на диске нет.
+  - `state_dir/tpm/map.age` — вся карта секретов, зашифрованная DEK; тот же
+    age-контейнер, что и escrow (§4), только «пароль» = DEK, а не мастер-пароль.
+  - `$XDG_RUNTIME_DIR/sctl/prim-<hash>.ctx` (fallback `<tmp>/sctl-<uid>/`) —
+    кэш контекста первичного ключа (не секрет). Живёт в per-boot tmpfs, **не** в
+    `state_dir`: сохранённый TPM-контекст зашифрован context-ключом, который TPM
+    регенерирует при каждом сбросе, поэтому файл валиден лишь в пределах одной
+    загрузки и всё равно пересоздаётся на первом mount после ребута. `<hash>` —
+    от `state_dir`, чтобы разные конфиги/параллельные тесты не сталкивались.
+- **Создание (seal), tpm2-tools 5.7 / tpm2-tss 4.1.3:**
   ```
-  tpm2_createprimary -C o -c prim.ctx
-  echo -n "$SECRET" | tpm2_create -C prim.ctx -i- -u <id>.pub -r <id>.priv -c <id>.ctx
+  tpm2_createprimary -C o -c prim.ctx           # один раз, кэшируется
+  echo -n "$DEK" | tpm2_create -C prim.ctx -i- -u dek.pub -r dek.priv
   ```
-- Вскрытие (unseal): первичный ключ ВОССОЗДАЁТСЯ каждый раз (детерминирован
-  для owner-иерархии с пустым auth + фикс. шаблон), затем
-  `tpm2_load` + `tpm2_unseal -c <id>.ctx`. NV-persistence не нужна.
+- **Вскрытие (unseal):**
   ```
-  tpm2_createprimary -C o -c prim.ctx
-  tpm2_load -C prim.ctx -u <id>.pub -r <id>.priv -c <id>.ctx
-  tpm2_unseal -c <id>.ctx -o out.bin
+  tpm2_load -C prim.ctx -u dek.pub -r dek.priv -c dek.ctx
+  tpm2_unseal -c dek.ctx            # → DEK; далее age-decrypt map.age под DEK
   ```
-- **PCR (hardened, опц.)**: `tpm2_createpolicy --policy-pcr -l sha256:7`,
-  `tpm2_create -L <policy>`; unseal через policy-сессию. Default — БЕЗ PCR
-  (блоб переживает обновления прошивки, не привязан к состоянию загрузки).
-  Поле `tpm_pcr` (глобальное) включает PCR-политику.
-- Доступ: устройства `/dev/tpmrm0`,`/dev/tpm0` группы `tss` (0660); юзер должен
-  быть в группе `tss` (после добавления — re-login). Без root не нужно.
+  Первичный ключ детерминирован (owner-иерархия), его контекст кэшируется в
+  `prim-<hash>.ctx` (per-boot tmpfs, §выше). Если `tpm2_load` падает (TPM очищен
+  `tpm2_clear` → context устарел) — контекст пересоздаётся автоматически и load
+  повторяется.
+- **PCR (hardened, опц.)**: `tpm_pcr=true` — пока `bail!` (не реализовано, §5
+  исходной спецификации). Default — без PCR.
+- **Права:** `dek.priv`/`dek.pub`/`map.age` (`state_dir/tpm/`) и `prim-*.ctx`
+  (runtime) — `chmod 0600` независимо от umask.
+- **Доступ:** `/dev/tpmrm0`,`/dev/tpm0` группы `tss` (0660); юзер в `tss`
+  (после добавления — re-login). Root не нужен.
 
 ## 6. Конфигурация
 
@@ -124,8 +149,8 @@ tpm_pcr                = false         # optional hardened PCR 7
 [secrets.gpg]
 path = ".gnupg"
 gpg = true
-gpg_preset = true
-tpm_gpg = true          # P этого home управляется через backend; без него — ручной ввод
+gpg_preset = true       # passphrases этого home управляются через backend (TPM или
+                      # escrow — по secret_backend); без secret_backend — ручной ввод
 
 [secrets.mail]
 path = ".local/share/mail"
@@ -135,11 +160,13 @@ depends = ["gpg"]
 Поля:
 - `secret_backend` — глобальный механизм. Не задан → **legacy**: gocryptfs
   через plaintext-`keyfile`, gpg — ручной ввод (`.common-seed` больше нет).
-- `tpm_gpg` (per-secret opt-in) — управлять passphrase gpg-ключей этого home
-  через backend. Без него gpg не обрабатывается автоматически (ручной ввод).
+- `gpg_preset` (per-secret opt-in) — управлять passphrase gpg-ключей этого home
+  через backend; механизм (tpm/escrow) выбирается `secret_backend`. Без
+  `secret_backend` (legacy) флаг неактивен — gpg не обрабатывается автоматически.
 - `escrow_file`, `master_passphrase_file` — пути (expanded_tilde).
-- Удаляемые поля/код: `gpg_passphrase_file`, `extract_secret` в `gpg.rs`.
-- `tpm_ssh` — будущий per-key opt-in для ssh (аналог `tpm_gpg`).
+- Удаляемые поля/код: `gpg_passphrase_file`, `extract_secret` в `gpg.rs`,
+  `tpm_gpg` (слит с `gpg_preset`: механизм теперь задаётся `secret_backend`).
+- `tpm_ssh` — будущий per-key opt-in для ssh (аналог `gpg_preset`).
 
 ## 7. Команды
 
@@ -148,7 +175,7 @@ depends = ["gpg"]
 
 Поведение:
 - **config-driven (по умолчанию, headless-дружественно)**: энроллит все
-  секреты с `tpm_gpg` (и gocryptfs G) без интерактива. G берётся из существующего
+  секреты с `gpg_preset` (и gocryptfs G) без интерактива. G берётся из существующего
   keyfile. gpg — ВСЕ секретные ключи home'а (перечислены ниже) энроллятся.
 - **`--interactive`**: перечисляет доступные ключи и даёт выбрать/мультивыбор.
 
@@ -174,14 +201,29 @@ gocryptfs (всегда, если backend задан):
   G = bytes(~/.config/sctl/key)   # adopt, без ре-инита томов
   map["gocryptfs:__shared__"] = G
 ```
-Финализация (атомарно):
+Финализация (`finalize`, атомарно — tmp + rename, `0600`):
 ```
-если backend == "tpm":  для каждой записи map -> tpm::seal(value, id)
-эскроу: blob = escrow::seal(map, master); пишем во временный файл -> rename(escrow_file)
+эскроу (всегда): blob = escrow::seal(map, master) -> escrow_file
+если backend == "tpm":
+    DEK = random(32)
+    tpm::seal_dek(DEK)                       # -> dek.priv/dek.pub
+    tpm_blob = escrow::seal(map, base64(DEK))  # тот же формат, «пароль»=DEK
+    write -> state_dir/tpm/map.age
 ```
-Промпты install: текущий пароль ключа (для смены) + мастер-пароль (для шифра
-эскроу). На экран при install — только краткое подтверждение; полные секреты —
-через `recovery`.
+Промпты install: пароль каждого gpg-ключа (проверяется на месте, см. ниже) +
+мастер-пароль (для escrow). На экран — только краткое подтверждение; полные
+секреты — через `recovery`.
+
+**Проверка пароля gpg на месте (v0.8.1+):** введённый пароль немедленно
+проверяется — кэшируется через `gpg-preset-passphrase` и затем `gpg
+--export-secret-keys <fpr>` вынуждает агент расшифровать ключ; неверный пароль →
+повтор запроса. (`--preset` сам по себе НЕ проверяет пароль, только кэширует.)
+
+**Пропуск ключа (v0.8.5):** на промпте пароля gpg-ключа **пустой Enter пропускает
+ключ** — он не попадает в бэкенд (не энроллится, не пресетится; gpg спросит его
+пароль вручную по необходимости). Имена пропускаемых ключей в конфиге НЕ хранятся
+(идея `gpg_skip_keys` отклонена как «имена ключей в конфиге»). Ctrl+S не
+используется — это XOFF терминала.
 
 ### 7.2 `sctl recovery`
 Мастер-пароль (prompt/file/env) → `escrow::open(escrow_file)` → **печать ВСЕЙ
@@ -194,21 +236,30 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
 
 ### 7.3 `sctl check` (расширить существующий)
 - backend == "tpm": наличие `tpm2-tools` (which), `/dev/tpmrm0`, юзер в `tss`;
-  для каждого managed-секрета — наличие TPM-блоба.
+  наличие `dek.priv` (sealed DEK) и `map.age`; права `map.age` (`0600`).
 - backend == "escrow": наличие `escrow_file`; доступность мастер-пароля
   (файл/env/prompt); **self-test** — decrypt эскроу мастер-паролем (успех/неудача).
-- **DESYNC-детектор**: если есть И TPM-блобы, И escrow — unseal все TPM + decrypt
-  escrow, сравнить карты; несовпадение → ошибка, требующая `sctl install`.
+- **DESYNC-детектор (v0.8.5)**: если есть И TPM, И escrow — расшифровать ОБЕ
+  полные карты (TPM через DEK, escrow через мастер-пароль) и сравнить ключ-в-ключ:
+  расхождение значения / запись только в одной карте → ошибка `sctl install`.
+  Пропущенные при install ключи просто отсутствуют в обеих картах — не ложно-
+  срабатывают. `check` не блокируется на интерактивном вводе мастер-пароля.
 
 ### 7.4 `sctl mount` (интеграция, без новой команды)
 Существующий поток, но с подменой источника:
 - gocryptfs: если `secret_backend` задан →
-  `pass = secret::resolve_secret("gocryptfs","__shared__")` → пишем во временный
-  `0600` passfile (`passfile.rs`) → кормим gocryptfs. Иначе legacy keyfile.
-- gpg preset (`gpg.rs`): если `backend` задан && `secret.tpm_gpg` → для каждого
-  энролленного ключа home'а `resolve_secret("gpg", "<home_id>:<fpr>")` → preset
-  через `gpg-preset-passphrase` по ВСЕМ keygrip'ам этого ключа (включая sub).
-  Иначе — ручной ввод (ничего не делаем).
+  `pass = secret::resolve_secret("gocryptfs","__shared__")` (для TPM — один
+  unseal DEK + decrypt `map.age`, кэш карты на процесс) → временный `0600`
+  passfile → gocryptfs. Иначе legacy keyfile.
+  - **Окно миграции:** если бэкенд ещё не заенроллен (`backend_missing`: нет
+    `dek.priv`/`map.age` или escrow-файла) — `mount` откатывается на legacy
+    `keyfile` с предупреждением, чтобы можно было примонтировать gpg-том ДО
+    первого `install`. Реальная ошибка unseal на *заенролленном* бэкенде
+    пробрасывается, отката нет.
+- gpg preset (`gpg.rs`): если `backend` задан && `secret.gpg_preset` → один раз
+  берём всю карту (`resolve_all`), для каждого ключа home'а, который ЕСТЬ в карте,
+  делаем preset через `gpg-preset-passphrase` по всем keygrip'ам (вкл. sub).
+  Ключи, пропущенные при install, отсутствуют в карте → тихо пропускаются.
 
 ## 8. Модульная структура (новые/изменённые файлы)
 
@@ -218,24 +269,28 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
   - `seal(map: &SecretMap, master: &Zeroizing<String>) -> Result<Vec<u8>>`
     (age-scrypt, возвращает зашифрованные байты).
   - `open(blob: &[u8], master: &Zeroizing<String>) -> Result<SecretMap>`.
-- `src/tpm.rs`:
-  - `seal(secret: &[u8], id: &str, pcr: bool) -> Result<()>` (пишет
-    `state_dir/tpm/<id>.{priv,pub}`).
-  - `unseal(id: &str) -> Result<Zeroizing<Vec<u8>>>`.
-  - shell-out к `tpm2_*`, использует временный `prim.ctx`.
-- `src/secret.rs` (новый) — единый `resolve_secret(kind, id) -> Result<Zeroizing<Vec<u8>>>`:
-  - backend=="tpm" → `tpm::unseal(id)`;
-  - backend=="escrow" → lazy-decrypt `escrow_file` (кэш карты в сессии) →
-    взять запись `format!("{kind}:{id}")`.
+- `src/tpm.rs` (v0.8.5, DEK-модель):
+  - `seal_dek(dek: &[u8], cfg) -> Result<()>` (пишет `state_dir/tpm/dek.{priv,pub}`).
+  - `unseal_dek(cfg) -> Result<Zeroizing<Vec<u8>>>` (кэш по пути `dek.priv`).
+  - `dek_exists(cfg) -> bool`.
+  - shell-out к `tpm2_*`; primary-контекст кэшируется в runtime tmpfs
+    (`config::runtime_dir()`, §5) и пересоздаётся при сбое load.
+- `src/secret.rs` — единый резолвер:
+  - `resolve_all(cfg) -> Result<SecretMap>` — вся карта из бэкенда (TPM: unseal
+    DEK + decrypt `map.age`; escrow: decrypt мастер-паролем). Кэш по пути файла
+    (`MAP_CACHE`), чтобы разные бэкенды/тесты не сталкивались.
+  - `resolve_secret(kind, id) -> Result<Zeroizing<Vec<u8>>>` = `resolve_all` +
+    выбор записи `format!("{kind}:{id}")`.
+  - `backend_missing(cfg) -> bool` — бэкенд ещё не заенроллен (окно миграции).
   - `SecretMap = BTreeMap<String, Zeroizing<Vec<u8>>>`.
 - `src/install.rs` — описанный в §7.1 поток.
 - `src/recovery.rs` — §7.2.
 - `cli.rs` — добавить `Install { names, interactive }`, `Recovery { filter }`;
   убрать упоминание backup.
-- `config.rs` — поля `secret_backend`, `tpm_gpg`, `tpm_ssh` (future),
+- `config.rs` — поля `secret_backend`, `gpg_preset`, `tpm_ssh` (future),
   `escrow_file`, `master_passphrase_file`, `tpm_pcr`; убрать `gpg_passphrase_file`.
 - `gpg.rs` — удалить `extract_secret` и логику `.common-seed`; `preset` через
-  `secret::resolve_secret` при `tpm_gpg`.
+  `secret::resolve_secret` при `gpg_preset`.
 - `mount.rs` — gocryptfs-ключ через `secret::resolve_secret`.
 - `check.rs` — §7.3.
 
@@ -274,7 +329,7 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
    свежего ключа + re-init — отдельная future-опция.
 2. **Escrow plaintext = TOML** (а не bincode) ради читаемости.
 3. **TPM: первичный ключ воссоздаётся каждый раз** (без NV-persistence).
-4. **config-driven install энроллит ВСЕ ключи** home'а с `tpm_gpg` (без
+4. **config-driven install энроллит ВСЕ ключи** home'а с `gpg_preset` (без
    поштучного выбора); выбор конкретных ключей — только в `--interactive`.
 5. **PCR выключен по умолчанию** (`tpm_pcr=false`); включение = привязка к
    secure-boot (PCR 7), ломается при обновлении прошивки.
@@ -325,6 +380,28 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
 значения для old/new, либо интерактивный `gpg --change-passphrase` в TTY-режиме.
 Зафиксировано в `src/install.rs` (док-comment у `build_map`).
 
+### 11.3. Принято (v0.8.5): DEK-модель вместо per-key TPM-блобов
+
+**Проблема:** TPM запечатывает не более ≈128 байт (проверено: 128 OK, 256 FAIL),
+а полная карта секретов больше. Исходный план «по TPM-блобу на запись» вдобавок
+светил имена/fingerprint'ы ключей в именах файлов и требовал по
+`load`+`unseal` на каждый секрет.
+
+**Решение (стандартная схема, как LUKS+TPM/clevis):**
+- `install` генерит случайный 32-байтный **DEK**, запечатывает в TPM **только
+  его** (влезает), и шифрует всю карту этим DEK → `map.age`.
+- `map.age` — **тот же age-контейнер, что и escrow**; отличается лишь ключ
+  обёртки: escrow = мастер-пароль, TPM = DEK. Один сериализованный формат карты,
+  две обёртки (требование пользователя: «один формат, по-разному шифруется»).
+- Ежедневно: **один** `tpm2_unseal` (DEK) → decrypt всей карты → `Zeroizing`-кэш
+  на процесс. Быстрее и без утечки имён на диск.
+- `prim.ctx` кэшируется (createprimary ~2 c → один раз; далее mount ~1.1 c).
+
+**Следствия:** `gpg_skip_keys` (имена в конфиге) отклонён в пользу
+интерактивного пропуска (пустой Enter). `tpm_gpg` слит с `gpg_preset`. В
+`state_dir/tpm/` из TPM-состояния только `dek.priv`, `dek.pub`, `map.age`;
+primary-контекст (`prim-<hash>.ctx`) вынесен в per-boot tmpfs (v0.8.6, §5).
+
 ## 12. Зависимости
 
 | Что | Тип | Источник | Примечание |
@@ -350,7 +427,7 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
 - [x] **C. Зависимости** добавлены в `Cargo.toml` (`age`, `secrecy`, `rand`,
         `base64`); решение `tss-esapi` vs `tpm2-tools` зафиксировано в §12.
 - [x] **1. `config.rs`** — поля `secret_backend`(enum), `escrow_file`,
-        `master_passphrase_file`, `tpm_pcr`; per-secret `tpm_gpg`. Учтены
+        `master_passphrase_file`, `tpm_pcr`; per-secret `gpg_preset`. Учтены
         конструкторы в `deps.rs`/тестах.
 - [x] **2. `src/rand.rs`** — `random_secret` (написан, подключён в `main.rs`).
 - [x] **3. `src/escrow.rs`** — `SecretMap`, `seal`/`open` (age 0.11.3 scrypt +
@@ -374,13 +451,13 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
          выше закрыт).
 - [x] **6. `src/install.rs`** + `cli.rs`(`Install{names,interactive}`) +
          `main.rs` — единственный writer: `build_map` (G из keyfile + gpg-пассфразы
-         `tpm_gpg`-секретов) → `finalize` (seal TPM + атомарная запись escrow).
+         `gpg_preset`-секретов) → `finalize` (seal TPM + атомарная запись escrow).
          Тесты `finalize_then_recovery_roundtrip_{escrow,tpm}` **проходят** (TPM
          реально). Алиас `inst` (чтобы не конфликтовать с `init`=`in`).
 - [x] **7. `src/recovery.rs`** + `cli.rs`(`Recovery{filter}`) — `read_map` +
          печать карты (base64). Тесты выше покрывают round-trip.
 - [x] **8. `gpg.rs`** — удалены `extract_secret`/`.common-seed`/`gpg_passphrase_file`;
-         `preset` через `secret::resolve_secret` при `backend+tpm_gpg` (fpr→keygrips
+         `preset` через `secret::resolve_secret` при `backend+gpg_preset` (fpr→keygrips
          рантаймом через `keys_with_keygrips`). Legacy/manual → no-op (ручной ввод).
 - [x] **9. `mount.rs`** — G через `resolve_secret` (+`passfile::from_bytes`);
          в backend-режиме прямое чтение keyfile не используется для монтирования.
@@ -398,11 +475,13 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
 
 ---
 
-## 14. Статус реализации (snapshot: 2026-07-12, обновлено)
+## 14. Статус реализации (snapshot: 2026-07-13, v0.8.6)
 
-**Вердикт: реализация завершена** (TODO §13 — все пункты `[x]`). Ежедневный путь
-(mount/gpg/check) подключён к бэкенду; изолированные и поведенческие тесты
-проходят, включая реальный TPM.
+**Вердикт: реализация завершена + переведена на DEK-модель (§17).** Ежедневный
+путь (mount/gpg/check) подключён к бэкенду; изолированные и поведенческие тесты
+проходят (39), включая реальный TPM. `cargo clippy --all-targets -D warnings`
+чист, без `#![allow(dead_code)]`. v0.8.6: `prim.ctx` перенесён в per-boot tmpfs
+(`$XDG_RUNTIME_DIR/sctl/`), см. §5/§17.4.
 
 ### Готово и рабочее (проверено)
 - Инфраструктура бэкенда: `config`, `escrow` (age scrypt + TOML), `tpm`
@@ -412,7 +491,7 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
   writer — `build_map` → `finalize` (seal TPM + атомарный escrow). Юнит-тесты
   round-trip зелёные, TPM-тест реально ходит в чип.
 - **Шаг 8:** `gpg.rs::preset` через `secret::resolve_secret` при
-  `backend+tpm_gpg` (fpr→keygrips через `keys_with_keygrips`); `.common-seed`/
+  `backend+gpg_preset` (fpr→keygrips через `keys_with_keygrips`); `.common-seed`/
   `extract_secret`/`gpg_passphrase_file` удалены.
 - **Шаг 9:** `mount.rs` берёт `G` из `resolve_secret` (+`passfile::from_bytes`);
   legacy-режим — через `keyfile`.
@@ -426,9 +505,21 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
   те же P; TPM-вариант проверяет отсутствие desync.
 - **Шаг 13:** README — раздел «Secret backend (TPM + escrow)» + `install`/
   `recovery`/`check`; gpg-preset обновлён.
+- **Финальный дизайн флага gpg:** `tpm_gpg` удалён; `gpg_preset` — единственный
+  per-secret флаг «этот gpg-home управляется через бэкенд» (энролл на `install`
+  + пресет на `mount`). Механизм (tpm/escrow) выбирается глобально
+  `secret_backend`, поэтому `gpg_preset` работает одинаково для обоих бэкендов
+  (escrow-энролл/пресет тоже поддержан, не только tpm).
+- **Харденинг прав доступа:** `install` пишет эскроу как `0600` независимо от
+  umask; TPM-файлы (`dek.priv`/`dek.pub`/`map.age` в `state_dir/tpm/`,
+  `prim-*.ctx` в runtime) — `chmod 0600`; `check` предупреждает, если
+  `map.age`/эскроу читаемы группой/остальными.
 - Фикстуры `tests/common/mod.rs` + `tests/keys_fixture.rs` — проходят.
-- **Итого: 37 тестов зелёных** (20 unit + 13 CLI-integration + 2 fixture +
-  2 behavioral).
+- **v0.8.5 — DEK-модель (§17):** единый формат карты, escrow=мастер-пароль /
+  TPM=sealed-DEK; один unseal на процесс; `prim.ctx`-кэш (mount ~3.8 c → ~1.1 c);
+  непрозрачное TPM-состояние (нет fpr в именах файлов); интерактивный пропуск
+  ключа (пустой Enter); проверка пароля gpg на месте; `sha2`/per-key блобы
+  удалены. Тесты: **39 зелёных**.
 
 ### Отложено (документировано, не блокирует)
 - **§11.2 Ротация gpg passphrase** — gpg 2.5.20 не меняет passphrase на *другой*
@@ -437,4 +528,197 @@ TPM/escrow → preset в gpg-agent). Секрет по-прежнему запе
   задействован; config-driven энроллит все ключи home'а (решение №4).
 - **`tss-esapi`** — выбран fallback `tpm2-tools` (§11.1); своп — опционально.
 - **PCR-политика** — `tpm_pcr=true` блокируется явной ошибкой (§5), не реализовано.
-- **SSH (`tpm_ssh`)** — future, отдельный opt-in (§6/§9).
+- **SSH (`tpm_ssh`)** — future, отдельный opt-in; дизайн и нюансы реализации в §16.
+
+## 15. Первый запуск (`install`) на уже настроенной машине
+
+Случай: конфиг и тома уже есть, gocryptfs-`filekey` существует. Цель — завести
+бэкенд, не сломав существующие тома.
+
+**Главное:** `install` **НЕ регенерирует** `filekey` — он забирает его байты как
+общий `G`. Существующие тома (инициализированные этим `filekey`) продолжают
+открываться. Регенерация сломала бы их.
+
+> Порядок (важно: gpg-хом — это **тоже** зашифрованный том, он должен быть
+> примонтирован ДО `install`, иначе enrolment gpg-пароля не найдёт home):
+
+```sh
+# 0. примонтируй gpg-том, чтобы ~/.gnupg появился.
+#    Если в конфиге уже стоит secret_backend — временно закомментируй его,
+#    примонтируй, потом верни и продолжи.
+sctl mount gpg
+
+# 1. мастер-пароль сессии install — шифрует escrow.
+#    Это НОВЫЙ пароль восстановления (не filekey, не gpg-пароль).
+export SCTL_MASTER_PASS='...надёжный пароль восстановления...'
+
+# 2. enrolment: keyfile -> G (seal в TPM); для каждого gpg_preset-ключа —
+#    запрос СУЩЕСТВУЮЩЕГО gpg-пароля (сохраняется как есть, НЕ меняется).
+sctl install
+#    опц. --names gpg|main|... — заенроллить подмножество секретов.
+
+# 3. проверка (check не блокируется на вводе мастер-пароля).
+sctl check
+sctl recovery          # base64 gocryptfs:__shared__ — сверь с ~/key
+
+# 4. переключаемся на backend-монтирование (gpg-пароль пресетится из TPM).
+sctl umount gpg && sctl mount gpg
+
+# 5. (опц.) харденинг: удали plaintext ~/key (после проверки!), положи
+#    master_passphrase_file (0600). Откат в любой момент — убрать secret_backend.
+```
+
+**Что явно НЕ делается и почему:**
+- `filekey` не регенерируется (иначе старые тома не откроются).
+- gpg-пароль **не ротируется** на случайный (§11.2: gpg 2.5.x не меняет пароль
+  неинтерактивно); хранится текущий — пресет работает.
+- выбор ключей: `install` проходит по всем primary-ключам gpg-home'а и на каждом
+  спрашивает пароль; **пустой Enter пропускает** ключ (v0.8.5, §7.1). Номерной
+  пикер (`--interactive`) по-прежнему отложен (§11.4).
+- **SSH**: секрет `ssh` здесь — это gocryptfs-том `~/.ssh`; пароли ssh-ключей
+  внутри **не** энроллятся (реализованы только gocryptfs + gpg). SSH-энроллмент —
+  future (§16).
+
+**Миграция с ранних сборок (per-key блобы → DEK, v0.8.5):** если TPM-состояние
+осталось от версий ≤0.8.2, удали устаревшие per-key файлы перед `install` (новый
+формат — `dek.*` + `map.age`):
+```sh
+rm -f ~/.config/sctl/state/tpm/gpg_gpg_* ~/.config/sctl/state/tpm/gocryptfs___shared__*
+rm -f ~/.config/sctl/state/tpm/prim.ctx   # v0.8.6: контекст переехал в $XDG_RUNTIME_DIR/sctl/
+# Убери gpg_skip_keys/tpm_gpg из config.toml, если были.
+sctl install     # создаст dek.priv/dek.pub/map.age
+```
+
+**Gap ре-енролла:** `install` читает `filekey`, а не escrow; если TPM потерян
+(смена железа), для повторного `install` нужен `G` из офлайн-бэкапа `filekey`
+(или future `install --from-escrow`).
+
+## 16. Идея / отложено: SSH-энроллмент (`tpm_ssh`)
+
+**Цель:** управлять паролями ssh-ключей так же, как gpg-ключами — энроллить в
+бэкенд (TPM/escrow) при `install` и пресетить в `ssh-agent` при `mount`, чтобы
+не вводить пароль ключа вручную.
+
+**Текущее состояние:** секрет `ssh` в конфиге — это просто gocryptfs-том
+`~/.ssh`; пароли ssh-ключей внутри бэкендом **не** трогаются (реализованы
+только gocryptfs + gpg). Опция `tpm_ssh` пока не существует.
+
+**Нюансы реализации (когда будем делать):**
+- **Обнаружение ключей.** В `~/.ssh` перебрать приватные ключи; для каждого
+  определить, защищён ли он паролем — `ssh-keygen -y -P '' -f <key>` падает ⇒
+  защищён. Идентификатор аналогичен gpg-fpr: comment ключа либо хэш публичного
+  ключа (`ssh-keygen -lf <key>`). Key id в бэкенде: `ssh:<name>:<comment>`.
+- **Энроллмент (`install`).** Новый opt-in `tpm_ssh` на секрете (как `gpg_preset`).
+  `build_map` для каждого защищённого ключа запрашивает пароль (через тот же
+  `GpgPassProvider`/`PromptProvider`) и кладёт `ssh:<name>:<id>` → пароль в
+  карту. `composite_key`/`gpg_id_tail` уже параметризованы kind, так что
+  добавляется kind `"ssh"`.
+- **Пресет при `mount` (главный нюанс).** У gpg есть `gpg-preset-passphrase`
+  с чётким API приёма пароля по stdin. У ssh **такого флага нет**: `ssh-add`
+  не принимает пароль аргументом/ stdin напрямую — он либо интерактивно
+  спрашивает, либо берёт через `SSH_ASKPASS` + `DISPLAY` (или `SSH_ASKPASS_REQUIRE=force`),
+  либо через `sshpass -P passphrase ssh-add`. Значит пресет требует либо
+  `SSH_ASKPASS`-обёртку, пишущую пароль, либо `sshpass`. Это отдельная
+  аккуратная обвязка (аналог `gpg::run_preset`), и она должна учитывать, что
+  пароль нельзя оставлять в процессе/логах.
+- **Жизненный цикл агента.** `gpg-agent` sctl уже убивает/управляет при
+  (пере)монтировании (`gpg_kill`). `ssh-agent` — отдельный;mount не должен его
+  убивать (сломает другие сессии), но после mount нужен re-preset (как
+  `gpg::preset_all`): пройтись по примонтированным `tpm_ssh`-секретам и
+  `ssh-add` их ключи. Убедиться, что `ssh-agent` запущен (завести, если нет).
+- **Desync-детектор.** `enrolled_ids` и детектор в `check` должны включать
+  `ssh:*` id наравне с `gpg:*`.
+- **Ключ без пароля.** Если ключ не защищён паролем — энроллить нечего,
+  пресет не нужен; просто пропускать (как gpg пропускает пустые).
+- **Безопасность.** Пароль ssh-ключа в памяти — `Zeroizing`; пресет через
+  временный `SSH_ASKPASS`-скрипт, удаляемый сразу после `ssh-add`.
+
+## 17. Актуальная архитектура: DEK-модель (v0.8.5, authoritative)
+
+Этот раздел описывает **фактическое** поведение реализации и имеет приоритет над
+§3/§5/§7/§8, где ещё упоминаются «per-key TPM-блобы».
+
+### 17.1 Единый формат карты, две обёртки
+
+Один сериализованный `SecretMap` (age-контейнер, plaintext = TOML с base64,
+`escrow::seal`/`open`), обёрнутый двумя способами:
+
+| Файл | Обёртка | Назначение |
+|------|---------|------------|
+| `escrow_file` (`sctl-escrow.age`) | мастер-пароль (age scrypt) | восстановление, переносимо на любую машину |
+| `state_dir/tpm/map.age` | **DEK** (age scrypt, «пароль» = base64(DEK)) | ежедневный быстрый путь на этой машине |
+| `state_dir/tpm/dek.priv`+`dek.pub` | запечатан в TPM | хранит сам DEK (32 байта) |
+| `$XDG_RUNTIME_DIR/sctl/prim-<hash>.ctx` | — (не секрет, per-boot tmpfs) | кэш контекста первичного ключа |
+
+`install` (единственный writer) пишет обе обёртки из одной in-memory карты →
+рассинхрон невозможен, если не править файлы руками. Ротация = повторный
+`install`.
+
+### 17.2 Почему DEK, а не sealed-карта
+
+TPM запечатывает ≤≈128 байт (проверено: 128 OK / 256 FAIL). Полная карта больше,
+поэтому в TPM кладётся только маленький DEK, а карту шифруем этим DEK на диске —
+классическая схема (LUKS+TPM, systemd-cryptenroll, clevis).
+
+### 17.3 Поток чтения (mount/gpg)
+
+```
+resolve_all(cfg):
+  TPM:    DEK = tpm2_unseal(dek.priv,dek.pub via prim.ctx)   # 1 раз на процесс
+          map = age_decrypt(map.age, base64(DEK))
+  escrow: map = age_decrypt(escrow_file, master)
+  → кэш MAP_CACHE[путь] (Zeroizing), далее берём нужные записи
+```
+Одна TPM-операция отдаёт всю карту; повторные `resolve_secret` бьют в кэш.
+
+### 17.4 Производительность
+
+`tpm2_createprimary` (~1.9 c) выполняется один раз и кэшируется в
+`prim-<hash>.ctx` (**runtime-каталог `$XDG_RUNTIME_DIR/sctl/`, tmpfs — не
+`state_dir`**, т.к. TPM saved-context живёт лишь до следующего сброса TPM);
+далее mount делает только `load`+`unseal`. Замерено: **mount ~3.8 c → ~1.1 c**.
+После ребута/`tpm2_clear` контекст устаревает — `load` падает, контекст
+пересоздаётся автоматически (первый mount снова ~3.8 c). Хранение в tmpfs точно
+совпадает со временем жизни контекста и не мусорит в персистентном state.
+
+### 17.5 Приватность на диске
+
+Никаких fingerprint'ов/имён ключей в файловой системе: только `dek.priv`,
+`dek.pub`, `map.age` (в `state_dir/tpm/`) и `prim-<hash>.ctx` (в runtime).
+Внутри `map.age` (зашифровано) ключи карты — составные id (`gpg:<name>:<fpr>` и
+т.п.), но на диск в открытом виде не попадают.
+
+### 17.6 Пропуск ключа при install
+
+На промпте пароля gpg-ключа **пустой Enter пропускает** ключ (не энроллится).
+Пароль проверяется на месте (preset + `--export-secret-keys`; неверный → повтор).
+Имена ключей в конфиге не хранятся (`gpg_skip_keys` отклонён). Ctrl+S не
+используется (XOFF). Пропущенный ключ просто отсутствует в карте — `check`
+не считает это рассинхроном, `mount`/preset его тихо пропускает.
+
+### 17.7 Окно миграции (первый `install`)
+
+Пока бэкенд не заенроллен (`backend_missing`: нет `dek.priv`/`map.age` или
+escrow-файла), `mount` откатывается на legacy `keyfile` с предупреждением — чтобы
+можно было примонтировать gpg-том до первого `install`. На заенролленном бэкенде
+реальная ошибка unseal пробрасывается (отката нет).
+
+### 17.8 API (актуальный)
+
+- `tpm.rs`: `seal_dek`, `unseal_dek`, `dek_exists` (+ приватные `ensure_primary`/
+  `recreate_primary`, берут `prim-<hash>.ctx` из `config::runtime_dir()`).
+- `config.rs`: `runtime_dir()` (`$XDG_RUNTIME_DIR/sctl`, fallback
+  `<tmp>/sctl-<uid>`), `primary_ctx_file()` (namespaced по hash(state_dir)).
+- `secret.rs`: `resolve_all`, `resolve_secret`, `backend_missing` (кэш `MAP_CACHE`
+  по пути файла — изолирует бэкенды и параллельные тесты).
+- `install.rs`: `build_map` (skip через `Option` от `GpgPassProvider`) →
+  `finalize` (escrow + при TPM: `seal_dek` + `map.age`), `write_atomic` (0600).
+- `check.rs`: presence (`dek_exists`+`map.age`+права) + desync (сравнение двух
+  полных карт).
+
+### 17.9 Что удалено в v0.8.5
+
+- Per-key TPM-блобы (`<id>.priv/.pub`), `tpm::seal/unseal/exists/blob_exists`.
+- `gpg_skip_keys` (конфиг), `is_skipped`, `list_primary_keys`, `enrolled_ids`.
+- `tpm_gpg` (слит в `gpg_preset`; ещё раньше).
+- Зависимость `sha2` (была нужна для непрозрачных per-key имён — больше нет).

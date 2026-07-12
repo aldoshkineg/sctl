@@ -62,9 +62,6 @@ struct RawSecret {
     /// Preset secret-key passphrases into gpg-agent after mounting.
     #[serde(default)]
     gpg_preset: bool,
-    /// Manage this gpg home's key passphrases through the secret backend.
-    #[serde(default)]
-    tpm_gpg: bool,
     /// Process names (comm) that may be killed silently on a busy unmount.
     #[serde(default)]
     auto_kill: Vec<String>,
@@ -97,8 +94,6 @@ pub struct Secret {
     pub gpg: bool,
     /// Preset secret-key passphrases into gpg-agent after mounting.
     pub gpg_preset: bool,
-    /// Manage this gpg home's key passphrases through the secret backend.
-    pub tpm_gpg: bool,
     /// Process names (comm) that may be killed silently on a busy unmount.
     pub auto_kill: Vec<String>,
     /// Force-unmount if stuck busy longer than `kill_busy_after` (watcher).
@@ -240,7 +235,6 @@ impl Config {
                     depends: r.depends,
                     gpg: r.gpg,
                     gpg_preset: r.gpg_preset,
-                    tpm_gpg: r.tpm_gpg,
                     auto_kill: r.auto_kill,
                     kill_busy: r.kill_busy.unwrap_or(false),
                     kill_busy_after: r.kill_busy_after,
@@ -292,6 +286,44 @@ impl Config {
     pub fn all_names(&self) -> Vec<String> {
         self.secrets.keys().cloned().collect()
     }
+
+    /// Directory holding TPM state (sealed DEK, encrypted map, primary context).
+    pub fn tpm_dir(&self) -> PathBuf {
+        self.state_dir.join("tpm")
+    }
+
+    /// The DEK-encrypted secret map file (TPM fast path). Same on-disk format
+    /// as the escrow file — an age container of the serialized map — but wrapped
+    /// by the TPM-sealed data-encryption key instead of the master passphrase.
+    pub fn tpm_map_file(&self) -> PathBuf {
+        self.tpm_dir().join("map.age")
+    }
+
+    /// Path to the persisted TPM primary-key context. This lives in a per-boot
+    /// runtime directory (tmpfs), NOT under `state_dir`: a saved TPM context is
+    /// encrypted with a context key that the TPM regenerates on every reset, so
+    /// the file is only valid within a single boot session and is regenerated on
+    /// the first mount after each reboot anyway. It is not secret material. The
+    /// filename is namespaced by a hash of `state_dir` so distinct configs (and
+    /// parallel tests) do not collide on the shared runtime directory.
+    pub fn primary_ctx_file(&self) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.state_dir.hash(&mut h);
+        runtime_dir().join(format!("prim-{:016x}.ctx", h.finish()))
+    }
+}
+
+/// Base runtime directory for ephemeral, per-boot state. Prefers
+/// `$XDG_RUNTIME_DIR` (a per-user tmpfs, mode 0700, wiped on logout/reboot —
+/// exactly matching a TPM saved context's lifetime); falls back to
+/// `<tmp>/sctl-<uid>` when `XDG_RUNTIME_DIR` is unset (e.g. cron sessions).
+pub fn runtime_dir() -> PathBuf {
+    if let Some(d) = env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d).join("sctl");
+    }
+    let uid = nix::unistd::Uid::current();
+    env::temp_dir().join(format!("sctl-{uid}"))
 }
 
 /// Resolve the user's home directory (env `HOME` first for test isolation).
@@ -327,7 +359,6 @@ mod tests {
             depends: vec![],
             gpg: false,
             gpg_preset: false,
-            tpm_gpg: false,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,

@@ -6,15 +6,37 @@ use crate::config::{Config, SecretBackend};
 use crate::escrow;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
-use std::sync::OnceLock;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use zeroize::Zeroizing;
 
 pub use crate::escrow::SecretMap;
 
-/// Cached decrypted escrow map for the process session.
-static ESCROW_CACHE: OnceLock<SecretMap> = OnceLock::new();
+/// Cached decrypted maps for the process session, keyed by their on-disk path
+/// (escrow file / TPM map file). Keying by path keeps distinct backends (and
+/// concurrent tests) from colliding on a single global cache.
+static MAP_CACHE: OnceLock<Mutex<HashMap<PathBuf, SecretMap>>> = OnceLock::new();
 /// Cached master passphrase (prompted/read once).
 static MASTER_CACHE: OnceLock<Zeroizing<String>> = OnceLock::new();
+
+/// Clone the cached map for `path`, if present.
+fn cached_map(path: &PathBuf) -> Option<SecretMap> {
+    MAP_CACHE
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.get(path).cloned())
+}
+
+/// Store `map` in the cache under `path` and return a clone.
+fn store_map(path: PathBuf, map: SecretMap) -> SecretMap {
+    if let Ok(mut g) = MAP_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        g.insert(path, map.clone());
+    }
+    map
+}
 
 /// Composite map/TPM key for a `(kind, id)` pair: `{kind}:{id}`. This is the
 /// single source of truth for key composition so `install`, `gpg` and `check`
@@ -29,6 +51,33 @@ pub fn gpg_id_tail(name: &str, fpr: &str) -> String {
     format!("{name}:{fpr}")
 }
 
+/// Whether the backend has not been enrolled yet (so `mount` may fall back to
+/// the legacy `keyfile` during the pre-`install` migration window). Real unseal
+/// failures on an *enrolled* backend still propagate through [`resolve_secret`].
+pub fn backend_missing(cfg: &Config) -> bool {
+    match cfg.secret_backend {
+        Some(SecretBackend::Tpm) => !tpm::dek_exists(cfg) || !cfg.tpm_map_file().exists(),
+        Some(SecretBackend::Escrow) => !cfg.escrow_file.exists(),
+        None => false,
+    }
+}
+
+/// Resolve the whole secret map from the configured backend, cached for the
+/// process session.
+///
+/// Both backends share one on-disk format (an age container of the serialized
+/// map); they differ only in how the map is unwrapped:
+/// - **TPM**: a single `tpm2_unseal` recovers the random DEK, which decrypts
+///   `tpm_map_file`. One TPM round-trip yields every secret.
+/// - **Escrow**: the master passphrase decrypts `escrow_file`.
+pub fn resolve_all(cfg: &Config) -> Result<SecretMap> {
+    match cfg.secret_backend {
+        Some(SecretBackend::Tpm) => tpm_map(cfg),
+        Some(SecretBackend::Escrow) => escrow_map(cfg),
+        None => bail!("resolve called in legacy mode (no secret_backend configured)"),
+    }
+}
+
 /// Resolve the composite key and return the secret bytes.
 ///
 /// `kind` is one of `gocryptfs`, `gpg`, `ssh`; `id` is the backend-specific
@@ -36,16 +85,24 @@ pub fn gpg_id_tail(name: &str, fpr: &str) -> String {
 /// `composite_key(kind, id)`.
 pub fn resolve_secret(cfg: &Config, kind: &str, id: &str) -> Result<Zeroizing<Vec<u8>>> {
     let key = composite_key(kind, id);
-    match cfg.secret_backend {
-        Some(SecretBackend::Tpm) => tpm::unseal(&key, cfg),
-        Some(SecretBackend::Escrow) => {
-            let map = escrow_map(cfg)?;
-            map.get(&key)
-                .cloned()
-                .with_context(|| format!("secret '{key}' not found in escrow"))
-        }
-        None => bail!("resolve_secret called in legacy mode (no secret_backend configured)"),
+    let map = resolve_all(cfg)?;
+    map.get(&key)
+        .cloned()
+        .with_context(|| format!("secret '{key}' not found in backend"))
+}
+
+/// Lazily unwrap the TPM map: unseal the DEK, decrypt `tpm_map_file` with it.
+fn tpm_map(cfg: &Config) -> Result<SecretMap> {
+    let path = cfg.tpm_map_file();
+    if let Some(m) = cached_map(&path) {
+        return Ok(m);
     }
+    let dek = tpm::unseal_dek(cfg).context("unsealing DEK from TPM")?;
+    let dek_pass = Zeroizing::new(B64.encode(dek.as_slice()));
+    let blob =
+        std::fs::read(&path).with_context(|| format!("reading TPM map {}", path.display()))?;
+    let map = escrow::open(&blob, &dek_pass).context("decrypting TPM map with DEK")?;
+    Ok(store_map(path, map))
 }
 
 /// Resolve the master passphrase. Source order: env `SCTL_MASTER_PASS` >
@@ -79,15 +136,16 @@ fn get_master_passphrase(cfg: &Config, allow_prompt: bool) -> Result<Zeroizing<S
 }
 
 /// Lazily decrypt the escrow file (cached for the session) and return the map.
-fn escrow_map(cfg: &Config) -> Result<&'static SecretMap> {
-    if let Some(m) = ESCROW_CACHE.get() {
+fn escrow_map(cfg: &Config) -> Result<SecretMap> {
+    let path = cfg.escrow_file.clone();
+    if let Some(m) = cached_map(&path) {
         return Ok(m);
     }
-    let blob = std::fs::read(&cfg.escrow_file)
-        .with_context(|| format!("reading escrow file {}", cfg.escrow_file.display()))?;
+    let blob =
+        std::fs::read(&path).with_context(|| format!("reading escrow file {}", path.display()))?;
     let master = read_master_passphrase(cfg)?;
     let map = escrow::open(&blob, &master)?;
-    Ok(ESCROW_CACHE.get_or_init(|| map))
+    Ok(store_map(path, map))
 }
 
 /// Master passphrase: env `SCTL_MASTER_PASS` > `master_passphrase_file` >
@@ -186,9 +244,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = cfg_with(SecretBackend::Tpm, dir.clone(), dir.join("escrow.age"));
-        let secret = rand_bytes(24);
-        tpm::seal(&secret, "gocryptfs:__shared__", &cfg).unwrap();
+
+        // Enroll the DEK + DEK-wrapped map exactly as `install::finalize` does.
+        let mut map = SecretMap::new();
+        let g = rand_bytes(24);
+        map.insert("gocryptfs:__shared__".into(), g.clone());
+        let mut dek = Zeroizing::new(vec![0u8; 32]);
+        rand::rng().fill_bytes(dek.as_mut_slice());
+        tpm::seal_dek(&dek, &cfg).unwrap();
+        let dek_pass = Zeroizing::new(B64.encode(dek.as_slice()));
+        let blob = escrow::seal(&map, &dek_pass).unwrap();
+        std::fs::write(cfg.tpm_map_file(), blob).unwrap();
+
         let got = resolve_secret(&cfg, "gocryptfs", "__shared__").unwrap();
-        assert_eq!(got.as_slice(), secret.as_slice());
+        assert_eq!(got.as_slice(), g.as_slice());
     }
 }

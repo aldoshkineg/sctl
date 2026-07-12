@@ -2,7 +2,7 @@
 //!
 //! This is the single writer. It:
 //!   1. adopts the shared gocryptfs key `G` from the existing keyfile,
-//!   2. collects each `tpm_gpg` gpg home's primary-key passphrase,
+//!   2. collects each `gpg_preset` gpg home's primary-key passphrase,
 //!   3. seals every entry into the TPM (when `secret_backend = "tpm"`), and
 //!   4. writes the age/scrypt escrow container atomically.
 //!
@@ -20,6 +20,11 @@ use crate::gpg;
 use crate::secret;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use rand::{Rng, rng};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use zeroize::Zeroizing;
 
 /// Options for the install command.
@@ -32,23 +37,60 @@ pub struct InstallOpts {
 }
 
 /// Source of an existing gpg key passphrase. Abstracted so tests can supply a
-/// known value without an interactive prompt.
+/// known value without an interactive prompt. `home` is the mounted gpg home
+/// (used to verify the passphrase); `uid` is the key's `Name <email>` for a
+/// human-readable prompt; `grips` are the key's keygrips (used to verify).
+///
+/// Returns `None` to *skip* this key (exclude it from backend enrollment).
 pub trait GpgPassProvider {
-    fn get(&self, secret: &Secret, fpr: &str) -> Result<Zeroizing<String>>;
+    fn get(
+        &self,
+        secret: &Secret,
+        home: &Path,
+        fpr: &str,
+        uid: &str,
+        grips: &[String],
+    ) -> Result<Option<Zeroizing<String>>>;
 }
 
-/// Real provider: prompt on the terminal.
+/// Real provider: prompt on the terminal, verifying the passphrase against the
+/// key via gpg-agent so a typo is caught immediately (rather than only at the
+/// next `mount`). An empty entry (just Enter) *skips* the key.
 pub struct PromptProvider;
 
 impl GpgPassProvider for PromptProvider {
-    fn get(&self, secret: &Secret, fpr: &str) -> Result<Zeroizing<String>> {
+    fn get(
+        &self,
+        secret: &Secret,
+        home: &Path,
+        fpr: &str,
+        uid: &str,
+        grips: &[String],
+    ) -> Result<Option<Zeroizing<String>>> {
         let shown = &fpr[..fpr.len().min(16)];
-        let p = rpassword::prompt_password(format!(
-            "Existing passphrase for gpg key {} (secret '{}'): ",
-            shown, secret.name
-        ))
-        .context("reading gpg passphrase")?;
-        Ok(Zeroizing::new(p))
+        let label = format!(
+            "Passphrase for gpg key {} ({}) [secret '{}'] (empty = skip this key): ",
+            shown, uid, secret.name
+        );
+        loop {
+            let pass = Zeroizing::new(
+                rpassword::prompt_password(&label).context("reading gpg passphrase")?,
+            );
+            if pass.is_empty() {
+                eprintln!("skipping gpg key {shown}");
+                return Ok(None);
+            }
+            if let Some(g) = grips.first() {
+                match gpg::verify_passphrase(home, fpr, g, pass.as_bytes()) {
+                    Ok(()) => return Ok(Some(pass)),
+                    Err(e) => {
+                        eprintln!("passphrase verification failed ({e:#}); try again");
+                        continue;
+                    }
+                }
+            }
+            return Ok(Some(pass));
+        }
     }
 }
 
@@ -59,14 +101,21 @@ pub struct ConstProvider<'a> {
 }
 
 impl GpgPassProvider for ConstProvider<'_> {
-    fn get(&self, _secret: &Secret, _fpr: &str) -> Result<Zeroizing<String>> {
-        Ok(Zeroizing::new(self.pass.to_string()))
+    fn get(
+        &self,
+        _secret: &Secret,
+        _home: &Path,
+        _fpr: &str,
+        _uid: &str,
+        _grips: &[String],
+    ) -> Result<Option<Zeroizing<String>>> {
+        Ok(Some(Zeroizing::new(self.pass.to_string())))
     }
 }
 
 /// Build the secret map to enroll.
 ///
-/// `names` restricts which `tpm_gpg` gpg homes are enrolled (empty = all). The
+/// `names` restricts which `gpg_preset` gpg homes are enrolled (empty = all). The
 /// shared gocryptfs key is always enrolled.
 pub fn build_map(
     cfg: &Config,
@@ -89,7 +138,7 @@ pub fn build_map(
     map.insert(secret::composite_key("gocryptfs", "__shared__"), g);
 
     for secret in cfg.secrets.values() {
-        if !secret.tpm_gpg {
+        if !secret.gpg_preset {
             continue;
         }
         if !names.is_empty() && !names.contains(&secret.name) {
@@ -103,13 +152,15 @@ pub fn build_map(
                 home.display()
             );
         }
-        let fprs = gpg::list_primary_fprs(&home)
+        let keys = gpg::keys_with_keygrips(&home)
             .with_context(|| format!("listing gpg keys for '{}'", secret.name))?;
-        if fprs.is_empty() {
+        if keys.is_empty() {
             bail!("no gpg secret keys found for secret '{}'", secret.name);
         }
-        for fpr in fprs {
-            let pass = provider.get(secret, &fpr)?;
+        for (fpr, uid, grips) in keys {
+            let Some(pass) = provider.get(secret, &home, &fpr, &uid, &grips)? else {
+                continue; // key skipped by the user (empty passphrase entry)
+            };
             let pass_bytes = Zeroizing::new(pass.as_bytes().to_vec());
             map.insert(
                 secret::composite_key("gpg", &secret::gpg_id_tail(&secret.name, &fpr)),
@@ -120,24 +171,45 @@ pub fn build_map(
     Ok(map)
 }
 
-/// Seal every entry into the TPM (if TPM backend) and write the escrow file.
+/// Persist the secret map into the configured backend(s).
 ///
-/// The escrow file is written atomically (tmp + rename). TPM blob writes are
-/// consistent because `finalize` runs as the sole writer (see docs §6).
+/// Always writes the escrow container (age/scrypt, master passphrase) as the
+/// portable recovery copy. In TPM mode additionally: generate a random 32-byte
+/// DEK, seal it into the TPM, and write the *same* map wrapped by that DEK to
+/// `tpm_map_file` (identical age format, DEK instead of the master passphrase).
+/// A single `tpm2_unseal` of the DEK then decrypts the whole map at mount time.
+///
+/// All files are written atomically (tmp + rename) with `0600` perms. `finalize`
+/// is the sole writer, so the two copies stay consistent (see docs §6).
 pub fn finalize(cfg: &Config, map: &escrow::SecretMap) -> Result<()> {
-    if let Some(SecretBackend::Tpm) = cfg.secret_backend {
-        for (id, secret) in map {
-            tpm::seal(secret, id, cfg).with_context(|| format!("sealing '{id}' into TPM"))?;
-        }
-    }
-
+    // Recovery copy: escrow wrapped by the master passphrase.
     let master = secret::read_master_passphrase(cfg)?;
-    let blob = escrow::seal(map, &master).context("sealing escrow container")?;
+    let escrow_blob = escrow::seal(map, &master).context("sealing escrow container")?;
+    write_atomic(&cfg.escrow_file, &escrow_blob)?;
 
-    let tmp = cfg.escrow_file.with_extension("age.tmp");
-    std::fs::write(&tmp, &blob).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &cfg.escrow_file)
-        .with_context(|| format!("installing {}", cfg.escrow_file.display()))?;
+    // Fast path: TPM-sealed DEK + DEK-wrapped map (same format as escrow).
+    if let Some(SecretBackend::Tpm) = cfg.secret_backend {
+        let mut dek = Zeroizing::new(vec![0u8; 32]);
+        rng().fill_bytes(dek.as_mut_slice());
+        tpm::seal_dek(&dek, cfg).context("sealing DEK into TPM")?;
+
+        let dek_pass = Zeroizing::new(B64.encode(dek.as_slice()));
+        let tpm_blob = escrow::seal(map, &dek_pass).context("sealing TPM map with DEK")?;
+        std::fs::create_dir_all(cfg.tpm_dir())
+            .with_context(|| format!("creating {}", cfg.tpm_dir().display()))?;
+        write_atomic(&cfg.tpm_map_file(), &tpm_blob)?;
+    }
+    Ok(())
+}
+
+/// Write `data` to `path` atomically (tmp + rename) with `0600` permissions,
+/// regardless of umask (the contents hold every secret).
+fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("installing {}", path.display()))?;
     Ok(())
 }
 

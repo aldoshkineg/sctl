@@ -145,14 +145,28 @@ fn dir_nonempty(p: &Path) -> bool {
 /// the legacy plaintext `keyfile` is used.
 fn resolve_gocryptfs_passfile(cfg: &Config, secret: &Secret) -> Result<passfile::Passfile> {
     if cfg.secret_backend.is_some() {
-        let g = secret::resolve_secret(cfg, "gocryptfs", "__shared__").with_context(|| {
-            format!(
-                "resolving gocryptfs key for '{}' from the secret backend \
-                 (run `sctl install` first)",
-                secret.name
-            )
-        })?;
-        return passfile::from_bytes(&g);
+        match secret::resolve_secret(cfg, "gocryptfs", "__shared__") {
+            Ok(g) => return passfile::from_bytes(&g),
+            // Migration window: the backend hasn't been enrolled yet (no blob),
+            // so fall back to the legacy plaintext keyfile instead of hard-failing.
+            // A real unseal error (blob present but TPM/escrow fails) still propagates.
+            Err(_e) if secret::backend_missing(cfg) => {
+                eprintln!(
+                    "warning: secret backend not enrolled yet (run `sctl install`); \
+                     using legacy keyfile for '{}'",
+                    secret.name
+                );
+                return passfile::resolve(&secret.name, &cfg.keyfile);
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "resolving gocryptfs key for '{}' from the secret backend",
+                        secret.name
+                    )
+                });
+            }
+        }
     }
     passfile::resolve(&secret.name, &cfg.keyfile)
 }

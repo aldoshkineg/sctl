@@ -21,16 +21,14 @@ path = ".ssh"
 path = ".gnupg"
 # gpg = true runs `gpgconf --kill all` around mount/unmount.
 gpg = true
-# Preload secret-key passphrases into gpg-agent after mounting, so you are not
-# prompted on every mount. In backend mode (secret_backend set + tpm_gpg
-# below) the passphrases are resolved from the secret backend; otherwise (legacy)
-# gpg falls back to an interactive prompt and nothing is preloaded. Requires
-# `allow-preset-passphrase` in the volume's gpg-agent.conf.
+# Backend-manage this gpg home: `install` enrolls its key passphrases into the
+# secret backend (TPM or escrow, selected by `secret_backend`), and `mount`
+# preloads them into gpg-agent from the backend — so you are never prompted.
+# Without `secret_backend` (legacy) this is a no-op and gpg prompts manually.
+# Requires `allow-preset-passphrase` in the volume's gpg-agent.conf.
+# At `sctl install` each key in this home is prompted for its passphrase; press
+# Enter on an empty prompt to skip a key (it is left out of the backend).
 gpg_preset = true
-# Manage this gpg home's key passphrases through the secret backend
-# (TPM/escrow): `install` enrolls them and `mount`/gpg-agent auto-unlock uses
-# them. Without it, gpg is entered manually.
-tpm_gpg = true
 # Force-unmount this secret if it stays `busy` (e.g. gpg-agent holds the
 # mountpoint, or a shell has cwd inside it) longer than kill_busy_after.
 # `sctl mount` forks a resident `sctl watch` daemon that polls every 60s and

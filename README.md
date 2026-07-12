@@ -70,15 +70,14 @@ escrow_file    = "~/.config/sctl/sctl-escrow.age"
 [secrets.gpg]
 path   = ".gnupg"
 gpg    = true
-gpg_preset = true
-tpm_gpg = true                              # manage this home's keys via backend
+gpg_preset = true                            # manage this home's keys via the backend
 ```
 
 ### `sctl install` — the single writer
 
 Enrolls every managed secret into the backend in one atomic, in-memory pass:
 adopts the shared gocryptfs key `G` from the existing `keyfile`, collects each
-`tpm_gpg` gpg home's key passphrase, seals every entry into the TPM (tpm
+`gpg_preset` gpg home's key passphrase, seals every entry into the TPM (tpm
 backend) **and** writes the age/scrypt escrow blob atomically. Run it once on
 each machine:
 
@@ -197,9 +196,10 @@ passphrases into gpg-agent via `gpg-preset-passphrase`.
 
 Two modes:
 
-- **Backend mode** (`secret_backend` set + `tpm_gpg = true` on the secret):
-  the passphrases are resolved from the backend and preloaded automatically —
-  no manual entry, no seed file. Run `sctl install` once to enroll the keys.
+- **Backend mode** (`secret_backend` set + `gpg_preset = true` on the secret):
+  the passphrases are resolved from the backend (TPM or escrow, per
+  `secret_backend`) and preloaded automatically — no manual entry, no seed file.
+  Run `sctl install` once to enroll the keys.
 - **Legacy / manual mode** (no `secret_backend`): gpg-agent is restarted on
   mount and you type the passphrase once. There is no automatic preloading.
 
@@ -216,7 +216,6 @@ Setup for backend mode:
    path = ".gnupg"
    gpg = true
    gpg_preset = true
-   tpm_gpg = true
    ```
 
 Preset failures are warnings and never abort the mount.

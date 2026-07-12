@@ -5,7 +5,7 @@
 //! gpg-agent via `gpg-preset-passphrase`, so the user is not prompted on every
 //! mount.
 //!
-//! In backend mode (`secret_backend` set + per-secret `tpm_gpg`) the
+//! In backend mode (`secret_backend` set + per-secret `gpg_preset`) the
 //! passphrases come from the secret backend via `secret::resolve_secret`;
 //! otherwise (legacy/manual) nothing is preloaded and gpg falls back to an
 //! interactive prompt. The historical `.common-seed` seed-file mechanism has
@@ -21,12 +21,12 @@ use std::process::{Command, Stdio};
 
 /// Preset passphrases for all enrolled secret keys in the secret's gnupg home.
 ///
-/// - Backend mode (`secret_backend` set + `tpm_gpg`): resolve each primary
+/// - Backend mode (`secret_backend` set + `gpg_preset`): resolve each primary
 ///   key's passphrase from the backend and preset it (plus its subkeys) into
 ///   gpg-agent. Best-effort: individual failures are warnings.
 /// - Otherwise (legacy/manual): no-op — gpg prompts interactively.
 pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
-    if cfg.secret_backend.is_none() || !secret.tpm_gpg {
+    if cfg.secret_backend.is_none() || !secret.gpg_preset {
         // Legacy or manual mode: nothing to preload automatically.
         return Ok(());
     }
@@ -41,19 +41,19 @@ pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
         return Ok(());
     }
 
+    // Load the whole backend map once; only keys actually enrolled are preset.
+    // Keys the user skipped at `install` are simply absent from the map and are
+    // silently left for gpg to prompt on demand.
+    let map = secret::resolve_all(cfg)?;
     let bin = preset_bin()?;
     let mut count = 0usize;
-    for (fpr, grips) in &keys {
-        let id = secret::gpg_id_tail(&secret.name, fpr);
-        let pass = match secret::resolve_secret(cfg, "gpg", &id) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("warning: gpg preset: {e:#}");
-                continue;
-            }
+    for (fpr, _uid, grips) in &keys {
+        let id = secret::composite_key("gpg", &secret::gpg_id_tail(&secret.name, fpr));
+        let Some(pass) = map.get(&id) else {
+            continue; // not enrolled (skipped at install)
         };
         for g in grips {
-            match run_preset(&bin, g, &pass) {
+            match run_preset(&bin, g, pass.as_slice()) {
                 Ok(()) => count += 1,
                 Err(e) => eprintln!("warning: gpg preset failed for keygrip {g}: {e:#}"),
             }
@@ -75,6 +75,10 @@ pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
 /// user is not prompted again for volumes they mounted earlier in the session.
 pub fn preset_all(cfg: &Config) -> Result<()> {
     for secret in cfg.secrets.values() {
+        // Preload a secret if it opts into preset, or if it is backend-managed
+        // (gpg_preset): this gpg home is managed by the secret backend, so
+        // `install` enrolls its passphrase and `mount` preloads it; the
+        // mechanism (tpm or escrow) is selected by `secret_backend`.
         if !secret.gpg_preset {
             continue;
         }
@@ -89,10 +93,12 @@ pub fn preset_all(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Collect `(primary_fpr, [keygrip, ...])` pairs for every secret key in a gpg
-/// home. Each primary key's list includes its own keygrip plus every subkey's
-/// keygrip (they share the primary key's passphrase, which is what we preset).
-fn keys_with_keygrips(home: &Path) -> Result<Vec<(String, Vec<String>)>> {
+/// Collect `(primary_fpr, primary_uid, [keygrip, ...])` triples for every
+/// secret key in a gpg home. Each primary key's list includes its own keygrip
+/// plus every subkey's keygrip (they share the primary key's passphrase, which
+/// is what we preset). `primary_uid` is the key's first user-id
+/// (`Name <email>`), used for human-readable prompts during `install`.
+pub fn keys_with_keygrips(home: &Path) -> Result<Vec<(String, String, Vec<String>)>> {
     let out = Command::new("gpg")
         .arg("--homedir")
         .arg(home)
@@ -107,29 +113,44 @@ fn keys_with_keygrips(home: &Path) -> Result<Vec<(String, Vec<String>)>> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
 
-    let mut keys: Vec<(String, Vec<String>)> = Vec::new();
-    let mut cur: Option<(String, Vec<String>)> = None;
+    let mut keys: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut cur: Option<(String, Option<String>, Vec<String>)> = None;
+    let mut pending_uid: Option<String> = None;
     let mut in_primary = false;
     let mut got_primary_fpr = false;
 
     for line in text.lines() {
         if line.starts_with("sec:") {
             if let Some(c) = cur.take() {
-                keys.push(c);
+                keys.push(to_triple(c));
             }
             in_primary = true;
             got_primary_fpr = false;
             cur = None;
+            pending_uid = None;
         } else if line.starts_with("ssb:") {
             // Subkey block: its grips belong to the current primary key.
             in_primary = false;
+        } else if line.starts_with("uid:") && in_primary {
+            let Some(u) = line.split(':').nth(9) else {
+                continue;
+            };
+            if u.is_empty() {
+                continue;
+            }
+            match cur.as_mut() {
+                Some((_, uid @ None, _)) => *uid = Some(u.to_string()),
+                Some(_) => {}
+                None => pending_uid = Some(u.to_string()),
+            }
         } else if line.starts_with("fpr:") && in_primary && !got_primary_fpr {
             if let Some(f) = line.split(':').nth(9) {
-                cur = Some((f.to_string(), Vec::new()));
+                let uid = pending_uid.take();
+                cur = Some((f.to_string(), uid, Vec::new()));
                 got_primary_fpr = true;
             }
         } else if line.starts_with("grp:") {
-            let Some((_, grips)) = cur.as_mut() else {
+            let Some((_, _, grips)) = cur.as_mut() else {
                 continue;
             };
             let Some(g) = line.split(':').nth(9) else {
@@ -141,44 +162,53 @@ fn keys_with_keygrips(home: &Path) -> Result<Vec<(String, Vec<String>)>> {
         }
     }
     if let Some(c) = cur.take() {
-        keys.push(c);
+        keys.push(to_triple(c));
     }
     Ok(keys)
 }
 
-/// List primary (master) key fingerprints in a gpg home.
-///
-/// Used by `install` to discover which keys to enroll. Returns the field-9
-/// fingerprint of each `sec` record — one per primary key. Subkeys (`ssb`) are
-/// skipped because they share the primary key's passphrase.
-pub fn list_primary_fprs(home: &Path) -> Result<Vec<String>> {
+/// Finalize a `(fpr, Option<uid>, grips)` accumulator into a `(fpr, uid, grips)`
+/// triple, defaulting a missing uid to an empty string.
+fn to_triple(c: (String, Option<String>, Vec<String>)) -> (String, String, Vec<String>) {
+    (c.0, c.1.unwrap_or_default(), c.2)
+}
+
+/// Verify a gpg key passphrase for real: cache the candidate via
+/// `gpg-preset-passphrase` and then export the secret key through the agent.
+/// `gpg-preset-passphrase --preset` alone only *caches* the passphrase (a typo
+/// is accepted silently), so we must exercise the key: exporting the secret key
+/// forces the agent to decrypt it with the cached passphrase, which fails on a
+/// wrong passphrase. On success the passphrase is left cached (avoids a later
+/// prompt). `fpr` selects the key; `keygrip` is the primary key's grip to cache.
+pub fn verify_passphrase(home: &Path, fpr: &str, keygrip: &str, passphrase: &[u8]) -> Result<()> {
+    Command::new("gpgconf")
+        .arg("--homedir")
+        .arg(home)
+        .arg("--launch")
+        .arg("gpg-agent")
+        .output()
+        .context("launching gpg-agent")?;
+    let bin = preset_bin()?;
+    run_preset(&bin, keygrip, passphrase)?;
+
     let out = Command::new("gpg")
         .arg("--homedir")
         .arg(home)
         .arg("--batch")
-        .arg("--with-colons")
-        .arg("--list-secret-keys")
+        .arg("--yes")
+        .arg("--output")
+        .arg("/dev/null")
+        .arg("--export-secret-keys")
+        .arg(fpr)
         .output()
-        .context("running gpg --list-secret-keys")?;
+        .context("running gpg to verify the passphrase")?;
     if !out.status.success() {
-        bail!("gpg --list-secret-keys failed for {}", home.display());
+        bail!(
+            "gpg passphrase verification failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut fprs = Vec::new();
-    let mut in_sec = false;
-    for line in text.lines() {
-        if line.starts_with("sec:") {
-            in_sec = true;
-        } else if line.starts_with("ssb:") {
-            in_sec = false;
-        } else if line.starts_with("fpr:") && in_sec {
-            if let Some(f) = line.split(':').nth(9) {
-                fprs.push(f.to_string());
-            }
-            in_sec = false;
-        }
-    }
-    Ok(fprs)
+    Ok(())
 }
 
 /// Locate `gpg-preset-passphrase` (lives in gpg's libexecdir).

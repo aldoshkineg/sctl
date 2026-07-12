@@ -38,7 +38,6 @@ fn cfg_for(
             depends: vec![],
             gpg: true,
             gpg_preset: true,
-            tpm_gpg: true,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,

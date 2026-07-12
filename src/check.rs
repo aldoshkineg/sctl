@@ -190,29 +190,28 @@ fn check_tpm(cfg: &Config, report: &mut dyn FnMut(Level, String)) {
         );
     }
 
-    // Per-secret TPM blob presence.
-    let ids = enrolled_ids(cfg);
-    let mut missing = Vec::new();
-    for id in &ids {
-        if !tpm::exists(id, cfg) {
-            missing.push(id.clone());
-        }
-    }
-    if missing.is_empty() {
-        report(Level::Ok, "all TPM blobs present".to_string());
-    } else {
+    // TPM enrollment: sealed DEK + DEK-encrypted map present.
+    if !tpm::dek_exists(cfg) {
+        report(
+            Level::Err,
+            "TPM DEK not enrolled (run `sctl install`)".to_string(),
+        );
+    } else if !cfg.tpm_map_file().is_file() {
         report(
             Level::Err,
             format!(
-                "missing TPM blobs: {} (run `sctl install`)",
-                missing.join(", ")
+                "TPM map missing: {} (run `sctl install`)",
+                cfg.tpm_map_file().display()
             ),
         );
+    } else {
+        report(Level::Ok, "TPM DEK and map present".to_string());
+        check_mode(&cfg.tpm_map_file(), 0o077, "TPM map", report);
     }
 
     // Desync vs escrow (if escrow file also present).
     if cfg.escrow_file.is_file() {
-        check_desync(cfg, &ids, report);
+        check_desync(cfg, report);
     }
 }
 
@@ -229,6 +228,7 @@ fn check_escrow(cfg: &Config, report: &mut dyn FnMut(Level, String)) {
         Level::Ok,
         format!("escrow file present: {}", cfg.escrow_file.display()),
     );
+    check_mode(&cfg.escrow_file, 0o077, "escrow file", report);
 
     // Master passphrase availability (env/file/prompt); report only, since
     // prompting during check is intrusive.
@@ -270,13 +270,12 @@ fn check_escrow(cfg: &Config, report: &mut dyn FnMut(Level, String)) {
     }
 }
 
-/// DESYNC detector (docs §2/§7.3). In TPM mode the mount path reads from the
-/// TPM, so the primary check is **TPM → escrow**: every enrolled TPM blob must
-/// match its escrow counterpart, and a TPM blob with no escrow entry (stale or
-/// orphaned) is reported. We also catch the reverse (escrow entry whose TPM
-/// blob diverges). A mismatch means mount or recovery would yield a stale
-/// secret.
-fn check_desync(cfg: &Config, ids: &[String], report: &mut dyn FnMut(Level, String)) {
+/// DESYNC detector (docs §2/§7.3). Both backends now hold the *whole* secret
+/// map in one age container (escrow wrapped by the master passphrase, TPM
+/// wrapped by the sealed DEK). This compares the two decrypted maps key-by-key:
+/// a value mismatch, or a key present in only one, means `mount` (TPM) and
+/// recovery (escrow) would disagree — re-run `sctl install`.
+fn check_desync(cfg: &Config, report: &mut dyn FnMut(Level, String)) {
     let master = match secret::read_master_passphrase_noninteractive(cfg) {
         Ok(m) => m,
         Err(e) => {
@@ -308,34 +307,37 @@ fn check_desync(cfg: &Config, ids: &[String], report: &mut dyn FnMut(Level, Stri
         }
     };
 
-    // Universe of ids to compare: enrolled TPM ids (config-derived) ∪ escrow keys.
-    let mut union: std::collections::BTreeSet<String> = ids.iter().cloned().collect();
-    union.extend(escrow_map.keys().cloned());
+    // The TPM map (DEK-unwrapped) is the daily-mount source of truth.
+    let tpm_map = match secret::resolve_all(cfg) {
+        Ok(m) => m,
+        Err(e) => {
+            report(
+                Level::Err,
+                format!("desync check: cannot read TPM map: {e:#}"),
+            );
+            return;
+        }
+    };
+
+    let mut union: std::collections::BTreeSet<&String> = escrow_map.keys().collect();
+    union.extend(tpm_map.keys());
 
     let mut mismatches = Vec::new();
-    let mut checked = 0usize;
     let mut tpm_only = Vec::new();
     let mut escrow_only = Vec::new();
-    for id in &union {
-        let tpm_present = tpm::exists(id, cfg);
-        let esc = escrow_map.get(id);
-        match (tpm_present, esc) {
-            (true, Some(esc_val)) => match tpm::unseal(id, cfg) {
-                Ok(tpm_val) => {
-                    if tpm_val.as_slice() == esc_val.as_slice() {
-                        checked += 1;
-                    } else {
-                        mismatches.push(id.clone());
-                    }
+    let mut checked = 0usize;
+    for id in union {
+        match (tpm_map.get(id), escrow_map.get(id)) {
+            (Some(t), Some(e)) => {
+                if t.as_slice() == e.as_slice() {
+                    checked += 1;
+                } else {
+                    mismatches.push(id.clone());
                 }
-                Err(e) => report(
-                    Level::Warn,
-                    format!("desync check: TPM unseal failed for {id}: {e:#}"),
-                ),
-            },
-            (true, None) => tpm_only.push(id.clone()),
-            (false, Some(_)) => escrow_only.push(id.clone()),
-            (false, None) => {}
+            }
+            (Some(_), None) => tpm_only.push(id.clone()),
+            (None, Some(_)) => escrow_only.push(id.clone()),
+            (None, None) => {}
         }
     }
 
@@ -352,7 +354,7 @@ fn check_desync(cfg: &Config, ids: &[String], report: &mut dyn FnMut(Level, Stri
         report(
             Level::Err,
             format!(
-                "TPM blobs without escrow counterpart (stale/orphan): {} — re-run `sctl install`",
+                "TPM map entries without escrow counterpart: {} — re-run `sctl install`",
                 tpm_only.join(", ")
             ),
         );
@@ -361,7 +363,7 @@ fn check_desync(cfg: &Config, ids: &[String], report: &mut dyn FnMut(Level, Stri
         report(
             Level::Warn,
             format!(
-                "escrow entries without TPM blob (mount will fail): {}",
+                "escrow entries without TPM counterpart (mount will fail): {}",
                 escrow_only.join(", ")
             ),
         );
@@ -379,30 +381,6 @@ fn check_desync(cfg: &Config, ids: &[String], report: &mut dyn FnMut(Level, Stri
             );
         }
     }
-}
-
-/// All secret ids that `install` should enroll into the TPM: the shared
-/// gocryptfs key plus every `tpm_gpg` gpg home's primary-key ids.
-fn enrolled_ids(cfg: &Config) -> Vec<String> {
-    let mut ids = vec!["gocryptfs:__shared__".to_string()];
-    for s in cfg.secrets.values() {
-        if !s.tpm_gpg {
-            continue;
-        }
-        let home = s.mountpoint(&cfg.home);
-        if !home.exists() {
-            continue;
-        }
-        if let Ok(fprs) = crate::gpg::list_primary_fprs(&home) {
-            for fpr in fprs {
-                ids.push(secret::composite_key(
-                    "gpg",
-                    &secret::gpg_id_tail(&s.name, &fpr),
-                ));
-            }
-        }
-    }
-    ids
 }
 
 fn read_escrow_bytes(cfg: &Config) -> anyhow::Result<Vec<u8>> {
@@ -461,57 +439,31 @@ fn check_mode(path: &Path, mask: u32, what: &str, report: &mut dyn FnMut(Level, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Secret, SecretBackend};
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::os::unix::fs::PermissionsExt;
 
-    fn cfg_with_gpg(name: &str, home: PathBuf, tpm_gpg: bool) -> Config {
-        let mut secrets = BTreeMap::new();
-        secrets.insert(
-            name.to_string(),
-            Secret {
-                name: name.to_string(),
-                rel_path: home.to_string_lossy().into_owned(),
-                idle: None,
-                depends: vec![],
-                gpg: true,
-                gpg_preset: true,
-                tpm_gpg,
-                auto_kill: vec![],
-                kill_busy: false,
-                kill_busy_after: None,
-                pre_mount: vec![],
-                post_mount: vec![],
-                pre_unmount: vec![],
-                post_unmount: vec![],
-            },
-        );
-        Config {
-            home: PathBuf::from("/h"),
-            state_dir: PathBuf::from("/c/state"),
-            stray_dir: PathBuf::from("/c/stray"),
-            enc_root: PathBuf::from("/c/enc"),
-            keyfile: PathBuf::from("/c/key"),
-            default_idle: None,
-            secret_backend: Some(SecretBackend::Tpm),
-            escrow_file: PathBuf::from("/c/escrow.age"),
-            master_passphrase_file: None,
-            tpm_pcr: false,
-            secrets,
+    /// `check_mode` flags group/other-accessible secret files.
+    #[test]
+    fn check_mode_flags_loose_perms() {
+        let dir = std::env::temp_dir().join("sctl-check-mode-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("secret");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut levels = Vec::new();
+        {
+            let mut report = |lvl: Level, _msg: String| levels.push(lvl);
+            check_mode(&f, 0o077, "secret", &mut report);
         }
-    }
+        assert!(levels.contains(&Level::Warn));
 
-    #[test]
-    fn enrolled_ids_gocryptfs_only() {
-        let cfg = cfg_with_gpg("gpg", PathBuf::from("/no/such/home"), false);
-        assert_eq!(enrolled_ids(&cfg), vec!["gocryptfs:__shared__".to_string()]);
-    }
-
-    #[test]
-    fn enrolled_ids_skips_missing_home() {
-        // tpm_gpg enabled but the gpg home is absent: only the shared key is
-        // enrolled (matches `build_map`, which bails on a missing home).
-        let cfg = cfg_with_gpg("gpg", PathBuf::from("/no/such/home"), true);
-        assert_eq!(enrolled_ids(&cfg), vec!["gocryptfs:__shared__".to_string()]);
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut levels = Vec::new();
+        {
+            let mut report = |lvl: Level, _msg: String| levels.push(lvl);
+            check_mode(&f, 0o077, "secret", &mut report);
+        }
+        // check_mode is silent on acceptable perms (no Warn emitted).
+        assert!(!levels.contains(&Level::Warn));
     }
 }
