@@ -18,6 +18,7 @@ pub mod procfs;
 pub mod rand;
 pub mod recovery;
 pub mod secret;
+pub mod ssh;
 pub mod state;
 pub mod status;
 pub mod sys;

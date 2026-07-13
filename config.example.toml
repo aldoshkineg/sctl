@@ -27,6 +27,13 @@ secret_backend = "tpm"
 
 [secrets.ssh]
 path = ".ssh"
+# Backend-manage this ssh home: `install` enrolls every private key's
+# passphrase into the secret backend (TPM or escrow), and `mount` preloads
+# them into ssh-agent from the backend — so you are never prompted. Without
+# `ssh_preset` these keys are left for ssh to prompt manually. At `sctl
+# install` each key in this home is prompted for its passphrase; press Enter
+# on an empty prompt to skip a key.
+# ssh_preset = true
 
 [secrets.gpg]
 path = ".gnupg"

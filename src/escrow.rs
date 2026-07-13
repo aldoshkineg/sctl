@@ -12,7 +12,8 @@ use std::io::{Read, Write};
 use zeroize::Zeroizing;
 
 /// The named secret map. Key = composite id (e.g. `gocryptfs:__shared__`,
-/// `gpg:<home_id>:<fpr>`, `ssh:<abspath>`). Value = raw secret bytes, zeroized
+/// `gpg:<home_id>:<fpr>`, `ssh:<name>:<fingerprint>`). Value = raw secret bytes,
+/// zeroized
 /// on drop.
 pub type SecretMap = BTreeMap<String, Zeroizing<Vec<u8>>>;
 

@@ -3,13 +3,17 @@
 Open / future work for `sctl`. Implementation history lives in git; older
 design TODOs (`TODO_legacy.md`, `TODO_watch_tpm.md`) are closed.
 
-## Future features
+## Implemented
 
-- **SSH key passphrase management (`tpm_ssh`).** Enroll ssh key passphrases into
-  the backend at `install` and preset them into `ssh-agent` at `mount`, the same
-  way gpg works today. Blocked on `ssh-add` having no stdin/arg passphrase API —
-  needs an `SSH_ASKPASS` wrapper or `sshpass`. gocryptfs + gpg are the only
-  enrolled kinds for now.
+- **SSH key passphrase management (`ssh_preset`).** ssh private-key passphrases
+  are enrolled into the backend at `install` (`--ssh-pass NAME=PASSWORD`,
+  `--yes` to confirm) and preset into `ssh-agent` at `mount` (via `ssh-add` +
+  `SSH_ASKPASS`, best-effort — skipped with a warning when `SSH_AUTH_SOCK` is
+  unset). Map keys are `ssh:<secret>:<SHA256:fingerprint>`, mirroring gpg.
+  Verified end-to-end through the binary by `tests/e2e.rs`
+  (`ssh_preset_install_enrolls_all_keys`).
+
+## Future features
 
 ## Possible improvements
 

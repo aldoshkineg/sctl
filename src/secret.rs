@@ -49,6 +49,13 @@ pub fn gpg_id_tail(name: &str, fpr: &str) -> String {
     format!("{name}:{fpr}")
 }
 
+/// Tail of an ssh secret-key id: `{name}:{fingerprint}` where `fingerprint` is
+/// the stable `SHA256:...` blob from `ssh-keygen -l`. Compose with
+/// `kind = "ssh"` via [`composite_key`] to obtain the full map key.
+pub fn ssh_id_tail(name: &str, fingerprint: &str) -> String {
+    format!("{name}:{fingerprint}")
+}
+
 /// Whether the backend has not been enrolled yet (so `mount`/`init` may prompt
 /// for the gocryptfs password during the pre-`install` migration window). Real
 /// unseal failures on an *enrolled* backend still propagate through
@@ -78,8 +85,8 @@ pub fn resolve_all(cfg: &Config) -> Result<SecretMap> {
 /// Resolve the composite key and return the secret bytes.
 ///
 /// `kind` is one of `gocryptfs`, `gpg`, `ssh`; `id` is the backend-specific
-/// tail (`__shared__`, `<home_id>:<fpr>`, `<abspath>`). The full map key is
-/// `composite_key(kind, id)`.
+/// tail (`__shared__`, `<name>:<fpr>`, `<name>:<fingerprint>`). The full map
+/// key is `composite_key(kind, id)`.
 pub fn resolve_secret(cfg: &Config, kind: &str, id: &str) -> Result<Zeroizing<Vec<u8>>> {
     let key = composite_key(kind, id);
     let map = resolve_all(cfg)?;

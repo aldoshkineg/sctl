@@ -40,6 +40,36 @@ pub fn have_gpg() -> bool {
     have("gpg")
 }
 
+/// Public gate: is the `ssh-keygen` binary available for fixtures/tests?
+pub fn have_ssh() -> bool {
+    have("ssh-keygen")
+}
+
+/// Generate `n` ssh key pairs (ed25519) at an explicit `dir` path (used by e2e
+/// tests where the directory must live exactly at a secret's mountpoint), all
+/// sharing `pass`. Mirrors [`gen_gpg_home_at`]'s intent for ssh.
+pub fn gen_ssh_home_at(dir: &std::path::Path, n: usize, pass: &str) {
+    assert!(
+        have_ssh(),
+        "ssh-keygen binary not found; fixture unavailable"
+    );
+    fs::create_dir_all(dir).unwrap();
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    for i in 0..n {
+        let name = format!("id_ed25519_{i}");
+        let mut c = Command::new("ssh-keygen");
+        c.args(["-t", "ed25519", "-f"])
+            .arg(dir.join(&name))
+            .args(["-N", pass, "-C", &name]);
+        let out = c.output().expect("spawn ssh-keygen");
+        assert!(
+            out.status.success(),
+            "ssh-keygen failed for {name}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 fn gpg(home: &PathBuf) -> Command {
     let mut c = Command::new("gpg");
     c.arg("--homedir").arg(home).arg("--batch");
@@ -238,6 +268,28 @@ mod tests {
         for k in &home.keys {
             assert!(k.has_sign, "primary must carry a sign subkey");
             assert!(k.has_auth, "primary must carry an auth subkey");
+        }
+    }
+
+    /// The ssh fixture: `n` key pairs, all sharing one passphrase.
+    #[test]
+    fn fixture_builds_ssh_home() {
+        if !have_ssh() {
+            eprintln!("skipping: ssh-keygen not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ssh");
+        gen_ssh_home_at(&p, 3, "fixture-ssh-pass");
+        assert!(p.join("id_ed25519_0").is_file(), "ssh key 0 missing");
+        assert!(p.join("id_ed25519_0.pub").is_file(), "ssh pub 0 missing");
+        assert!(p.join("id_ed25519_2").is_file(), "ssh key 2 missing");
+
+        // The lib's discovery must see the generated keys (and ignore .pub).
+        let keys = sctl::ssh::keys_in_dir(&p).unwrap();
+        assert_eq!(keys.len(), 3, "expected 3 ssh private keys");
+        for k in &keys {
+            assert!(k.fingerprint.starts_with("SHA256:"));
         }
     }
 }
