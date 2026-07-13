@@ -266,9 +266,9 @@ impl Config {
 
     /// Look up a secret by name or error.
     pub fn get(&self, name: &str) -> Result<&Secret> {
-        self.secrets
-            .get(name)
-            .with_context(|| format!("unknown secret: {name}"))
+        self.secrets.get(name).with_context(|| {
+            format!("unknown secret: {name}, check the secrets in the configuration file")
+        })
     }
 
     /// All secret names, sorted (BTreeMap order).
