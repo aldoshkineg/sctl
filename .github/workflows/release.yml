@@ -24,6 +24,8 @@ jobs:
             name: linux-x86_64-static
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install musl tools
         if: endsWith(matrix.target, '-musl')
@@ -51,10 +53,29 @@ jobs:
           tar -czf "$dist.tar.gz" "$dist"
           sha256sum "$dist.tar.gz" > "$dist.tar.gz.sha256"
 
+      - name: Build release notes
+        run: |
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          RANGE="${PREV:+${PREV}..}HEAD"
+          REPO="${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+          feat=$(git log --no-merges --pretty=format:'%s|%h' "$RANGE" | awk -F'|' 'tolower($1) ~ /^feat/ {print "- " $1 " (" $2 ")"}')
+          fix=$(git log --no-merges --pretty=format:'%s|%h' "$RANGE" | awk -F'|' 'tolower($1) ~ /^fix/ {print "- " $1 " (" $2 ")"}')
+          oth=$(git log --no-merges --pretty=format:'%s|%h' "$RANGE" | awk -F'|' 'tolower($1) !~ /^(feat|fix)/ {print "- " $1 " (" $2 ")"}')
+          {
+            echo "## What's Changed"
+            echo
+            [ -n "$feat" ] && { echo "### Features"; echo "$feat"; echo; }
+            [ -n "$fix" ]  && { echo "### Fixes"; echo "$fix"; echo; }
+            [ -n "$oth" ]  && { echo "### Other"; echo "$oth"; echo; }
+            [ -n "$PREV" ] && echo "**Full Changelog**: https://github.com/${REPO}/compare/${PREV}...${TAG}"
+          } > release-notes.md
+          cat release-notes.md
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             sctl-*.tar.gz
             sctl-*.tar.gz.sha256
-          generate_release_notes: true
+          body_path: release-notes.md
