@@ -1,6 +1,6 @@
 [package]
 name = "sctl"
-version = "0.8.6"
+version = "0.9.3"
 edition = "2024"
 rust-version = "1.89"
 description = "Config-driven gocryptfs secret mount manager with dependencies, idle auto-unmount, and desktop notifications."
@@ -15,6 +15,7 @@ exclude = ["/.github", "/legacy"]
 [dependencies]
 age = "0.11.3"
 anyhow = "1.0.103"
+bech32 = "0.9"
 base64 = "0.22.1"
 clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
 clap_complete = "4.6.7"

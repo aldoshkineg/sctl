@@ -32,7 +32,7 @@ Config lives at `~/.config/sctl/config.toml` (see [`config.example.toml`](config
 [settings]
 default_idle = "15m"
 enc_root = "~/.encrypted"
-keyfile = "~/.config/sctl/key"
+secret_backend = "tpm"        # required: "tpm" | "escrow" (see below)
 
 [secrets.gpg]
 path = ".gnupg"
@@ -48,21 +48,23 @@ auto_kill = ["lf", "nnn"]
 
 ## Secret backend (TPM + escrow)
 
-`sctl` can manage its secrets (the shared gocryptfs key `G` and per-gpg-key
-passphrases) through a hardware/escrow backend instead of a plaintext keyfile.
-This is governed by the global `secret_backend` setting:
+`sctl` manages its secrets (the shared gocryptfs password `G` and per-gpg-key
+passphrases) through a hardware/escrow backend. `secret_backend` is **required**:
 
 - **`tpm`** — secrets are sealed into the machine's TPM (zero input on mount)
   and mirrored into an encrypted *escrow* blob for recovery.
 - **`escrow`** — no TPM; secrets are decrypted from the escrow blob using a
   master passphrase (env `SCTL_MASTER_PASS`, `master_passphrase_file`, or a
   prompt).
-- **unset (legacy)** — gocryptfs uses the plaintext `keyfile`; gpg is entered
-  manually.
+
+`G` is entered once at `sctl install` (prompt, or env `CRYPT_PASS` for
+automation) and stored only in the backend — there is no plaintext keyfile on
+disk. Before the first `install`, `mount`/`init` prompt for the gocryptfs
+password so you can mount a volume to enroll it.
 
 ```toml
 [settings]
-secret_backend = "tpm"                       # "tpm" | "escrow" | (unset = legacy)
+secret_backend = "tpm"                       # required: "tpm" | "escrow"
 escrow_file    = "~/.config/sctl/sctl-escrow.age"
 # master_passphrase_file = "~/.config/sctl/master.pass"   # emergency only
 # tpm_pcr        = false                    # bind seals to PCR 7 (secure-boot)
@@ -76,8 +78,8 @@ gpg_preset = true                            # manage this home's keys via the b
 ### `sctl install` — the single writer
 
 Enrolls every managed secret into the backend in one atomic, in-memory pass:
-adopts the shared gocryptfs key `G` from the existing `keyfile`, collects each
-`gpg_preset` gpg home's key passphrase, seals every entry into the TPM (tpm
+prompts for the shared gocryptfs password `G` (or reads `CRYPT_PASS`), collects
+each `gpg_preset` gpg home's key passphrase, seals every entry into the TPM (tpm
 backend) **and** writes the age/scrypt escrow blob atomically. Run it once on
 each machine:
 
@@ -196,12 +198,12 @@ passphrases into gpg-agent via `gpg-preset-passphrase`.
 
 Two modes:
 
-- **Backend mode** (`secret_backend` set + `gpg_preset = true` on the secret):
-  the passphrases are resolved from the backend (TPM or escrow, per
-  `secret_backend`) and preloaded automatically — no manual entry, no seed file.
-  Run `sctl install` once to enroll the keys.
-- **Legacy / manual mode** (no `secret_backend`): gpg-agent is restarted on
-  mount and you type the passphrase once. There is no automatic preloading.
+- **Managed** (`gpg_preset = true` on the secret): the passphrases are resolved
+  from the backend (TPM or escrow, per `secret_backend`) and preloaded
+  automatically — no manual entry, no seed file. Run `sctl install` once to
+  enroll the keys.
+- **Manual** (`gpg_preset` unset): gpg-agent is restarted on mount and you type
+  the passphrase once. There is no automatic preloading.
 
 Setup for backend mode:
 
@@ -261,8 +263,9 @@ volume is locked. Once mounted, new shells pick them up automatically.
 ## Environment overrides
 
 `SCTL_CONFIG_DIR`, `SCTL_CONFIG`, `SCTL_STATE_DIR`, `SCTL_ENC_ROOT`,
-`SCTL_KEYFILE`, `SCTL_DEFAULT_IDLE`, `SCTL_IDLE`, `SCTL_NO_IDLE`, `SCTL_KEY`,
-`CRYPT_PASS`, `SCTL_STRAY_DIR`, `SCTL_COLOR` (`always`/`never`), `NO_COLOR`.
+`SCTL_DEFAULT_IDLE`, `SCTL_IDLE`, `SCTL_NO_IDLE`, `SCTL_MASTER_PASS`,
+`CRYPT_PASS` (non-interactive gocryptfs password), `SCTL_STRAY_DIR`,
+`SCTL_COLOR` (`always`/`never`), `NO_COLOR`.
 
 ## License
 

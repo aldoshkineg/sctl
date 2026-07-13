@@ -34,7 +34,7 @@ fn effective_idle(cfg: &Config, secret: &Secret, no_idle: bool) -> Option<String
 
 /// Create an encrypted container and migrate any existing cleartext into it.
 pub fn init_one(cfg: &Config, secret: &Secret) -> Result<()> {
-    let _lock = crate::lock::acquire(&cfg.state_dir, &secret.safe(), &secret.name)?;
+    let _lock = crate::lock::acquire(&cfg.runtime_dir(), &secret.safe(), &secret.name)?;
     let enc = secret.enc_dir(&cfg.enc_root);
     let mnt = secret.mountpoint(&cfg.home);
 
@@ -45,9 +45,10 @@ pub fn init_one(cfg: &Config, secret: &Secret) -> Result<()> {
         bail!("{} already initialized at {}", secret.name, enc.display());
     }
     std::fs::create_dir_all(&enc)?;
+    let _lock = crate::lock::acquire(&cfg.runtime_dir(), &secret.safe(), &secret.name)?;
     std::fs::create_dir_all(&mnt)?;
 
-    let pf = passfile::resolve(&secret.name, &cfg.keyfile)?;
+    let pf = resolve_gocryptfs_passfile(cfg, secret, true)?;
     println!("Initializing encrypted container: {}", enc.display());
     sys::gocryptfs_init(&enc, pf.path())?;
 
@@ -73,7 +74,7 @@ pub fn init_one(cfg: &Config, secret: &Secret) -> Result<()> {
 
 /// Mount a single secret's container.
 pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
-    let _lock = crate::lock::acquire(&cfg.state_dir, &secret.safe(), &secret.name)?;
+    let _lock = crate::lock::acquire(&cfg.runtime_dir(), &secret.safe(), &secret.name)?;
     let enc = secret.enc_dir(&cfg.enc_root);
     let mnt = secret.mountpoint(&cfg.home);
 
@@ -105,7 +106,7 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
     std::fs::create_dir_all(&mnt)?;
 
     let idle = effective_idle(cfg, secret, opts.no_idle);
-    let pf = resolve_gocryptfs_passfile(cfg, secret)?;
+    let pf = resolve_gocryptfs_passfile(cfg, secret, false)?;
     sys::gocryptfs_mount(&enc, &mnt, pf.path(), idle.as_deref())?;
 
     let tag = match &idle {
@@ -119,7 +120,7 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
     );
 
     state::persist(
-        &cfg.state_dir,
+        &cfg.runtime_dir(),
         &secret.safe(),
         idle.as_deref().unwrap_or("none"),
     )?;
@@ -138,37 +139,36 @@ fn dir_nonempty(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the gocryptfs passfile for a mount.
+/// Resolve the gocryptfs passfile for a mount or init.
 ///
-/// In backend mode (`secret_backend` set) the shared key `G` is read from the
-/// backend via `secret::resolve_secret` (zero input from the user). Otherwise
-/// the legacy plaintext `keyfile` is used.
-fn resolve_gocryptfs_passfile(cfg: &Config, secret: &Secret) -> Result<passfile::Passfile> {
-    if cfg.secret_backend.is_some() {
-        match secret::resolve_secret(cfg, "gocryptfs", "__shared__") {
-            Ok(g) => return passfile::from_bytes(&g),
-            // Migration window: the backend hasn't been enrolled yet (no blob),
-            // so fall back to the legacy plaintext keyfile instead of hard-failing.
-            // A real unseal error (blob present but TPM/escrow fails) still propagates.
-            Err(_e) if secret::backend_missing(cfg) => {
-                eprintln!(
-                    "warning: secret backend not enrolled yet (run `sctl install`); \
-                     using legacy keyfile for '{}'",
-                    secret.name
-                );
-                return passfile::resolve(&secret.name, &cfg.keyfile);
-            }
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "resolving gocryptfs key for '{}' from the secret backend",
-                        secret.name
-                    )
-                });
-            }
+/// The shared key `G` is read from the configured secret backend via
+/// `secret::resolve_secret` (zero input from the user). During the pre-`install`
+/// migration window — when the backend has not been enrolled yet — it falls back
+/// to prompting for the gocryptfs password (or `CRYPT_PASS`). `create` requests a
+/// confirmed prompt (used by `init`, which creates a new container). A real
+/// unseal error on an *enrolled* backend still propagates.
+fn resolve_gocryptfs_passfile(
+    cfg: &Config,
+    secret: &Secret,
+    create: bool,
+) -> Result<passfile::Passfile> {
+    match secret::resolve_secret(cfg, "gocryptfs", "__shared__") {
+        Ok(g) => passfile::from_bytes(&g),
+        Err(_e) if secret::backend_missing(cfg) => {
+            eprintln!(
+                "warning: secret backend not enrolled yet (run `sctl install`); \
+                 prompting for the gocryptfs password for '{}'",
+                secret.name
+            );
+            passfile::prompt(&secret.name, create)
         }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "resolving gocryptfs key for '{}' from the secret backend",
+                secret.name
+            )
+        }),
     }
-    passfile::resolve(&secret.name, &cfg.keyfile)
 }
 
 fn migrate_into(src: &Path, dst: &Path) -> Result<()> {
@@ -205,18 +205,23 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn move_stray_aside(cfg: &Config, secret: &Secret, mnt: &Path) -> Result<()> {
-    std::fs::create_dir_all(&cfg.stray_dir)?;
+    std::fs::create_dir_all(cfg.stray_dir())?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let dest = cfg.stray_dir.join(format!("{}_{}", secret.safe(), ts));
+    let dest = cfg.stray_dir().join(format!("{}_{}", secret.safe(), ts));
+    std::fs::create_dir_all(cfg.stray_dir())?;
     println!(
         "Mountpoint {} not empty (stray files) -> moving aside to {}",
         mnt.display(),
         dest.display()
     );
-    std::fs::rename(mnt, &dest)?;
+    // Copy+remove rather than rename: the stray dir lives in the per-boot
+    // runtime dir (often a tmpfs), while the mountpoint may be on another
+    // filesystem, and `rename` cannot cross devices.
+    copy_dir(mnt, &dest)?;
+    std::fs::remove_dir_all(mnt)?;
     std::fs::create_dir_all(mnt)?;
     Ok(())
 }

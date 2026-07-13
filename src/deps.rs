@@ -191,7 +191,7 @@ fn order_subset(cfg: &Config, set: &[String]) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Secret};
+    use crate::config::{Config, Secret, SecretBackend};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -221,11 +221,9 @@ mod tests {
         Config {
             home: PathBuf::from("/h"),
             state_dir: PathBuf::from("/c/state"),
-            stray_dir: PathBuf::from("/c/stray"),
             enc_root: PathBuf::from("/e"),
-            keyfile: PathBuf::from("/c/key"),
             default_idle: None,
-            secret_backend: None,
+            secret_backend: SecretBackend::Escrow,
             escrow_file: PathBuf::from("/c/sctl-escrow.age"),
             master_passphrase_file: None,
             tpm_pcr: false,

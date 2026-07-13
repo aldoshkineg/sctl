@@ -28,19 +28,19 @@ pub fn one_pass(cfg: &Config) -> Result<()> {
         // A secret mounted with `--no-idle` (or SCTL_NO_IDLE) opted out of all
         // automatic unmounting, including the busy watcher; never force-unmount
         // it. Drop any stale busy marker so it does not linger.
-        if state::idle_disabled(&cfg.state_dir, &safe) {
-            state::clear_busy(&cfg.state_dir, &safe);
+        if state::idle_disabled(&cfg.runtime_dir(), &safe) {
+            state::clear_busy(&cfg.runtime_dir(), &safe);
             continue;
         }
         let mnt = secret.mountpoint(&cfg.home);
 
         if !is_mounted(&mnt) {
-            state::clear_busy(&cfg.state_dir, &safe);
+            state::clear_busy(&cfg.runtime_dir(), &safe);
             continue;
         }
         let pids = busy_pids(&mnt);
         if pids.is_empty() {
-            state::clear_busy(&cfg.state_dir, &safe);
+            state::clear_busy(&cfg.runtime_dir(), &safe);
             continue;
         }
 
@@ -53,10 +53,10 @@ pub fn one_pass(cfg: &Config) -> Result<()> {
 
         // First time we see it busy: just remember the moment, wait for the
         // threshold on subsequent passes.
-        let since = match state::busy_since(&cfg.state_dir, &safe) {
+        let since = match state::busy_since(&cfg.runtime_dir(), &safe) {
             Some(s) => s,
             None => {
-                state::mark_busy(&cfg.state_dir, &safe, now)?;
+                state::mark_busy(&cfg.runtime_dir(), &safe, now)?;
                 continue;
             }
         };
@@ -76,7 +76,7 @@ pub fn one_pass(cfg: &Config) -> Result<()> {
             if let Err(e) = umount_one(cfg, secret, opts) {
                 eprintln!("error: force unmount of {} failed: {e:#}", secret.name);
             }
-            state::clear_busy(&cfg.state_dir, &safe);
+            state::clear_busy(&cfg.runtime_dir(), &safe);
         }
     }
     Ok(())

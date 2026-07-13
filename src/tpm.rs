@@ -22,11 +22,15 @@
 //! ```
 
 use crate::config::Config;
+use crate::escrow::SecretMap;
+use age::x25519::{Identity, Recipient};
 use anyhow::{Context, Result, bail};
+use bech32::{ToBase32, Variant};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 use zeroize::Zeroizing;
 
@@ -54,6 +58,12 @@ fn dek_paths(state_dir: &Path) -> (PathBuf, PathBuf) {
 /// persisting it avoids the slow `tpm2_createprimary` (~2s) within a boot
 /// session, but a TPM saved context is only valid until the next TPM reset, so
 /// it is regenerated after each reboot anyway. It is not secret material.
+///
+/// Invariant (from the user's design): if the `.ctx` file is **present but
+/// invalid** (e.g. the TPM owner was cleared / reset since it was written), the
+/// later `tpm2_load` of the DEK fails clearly and the operator re-runs
+/// `sctl install` — we do NOT silently recreate it here. The file is only
+/// created when it is **absent**.
 fn ensure_primary(cfg: &Config) -> Result<PathBuf> {
     let p = cfg.primary_ctx_file();
     if p.is_file() {
@@ -67,12 +77,6 @@ fn ensure_primary(cfg: &Config) -> Result<PathBuf> {
         .with_context(|| format!("creating TPM primary key at {ps}"))?;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).ok();
     Ok(p)
-}
-
-/// Recreate the primary-key context (e.g. after the TPM owner was cleared).
-fn recreate_primary(cfg: &Config) -> Result<PathBuf> {
-    let _ = std::fs::remove_file(cfg.primary_ctx_file());
-    ensure_primary(cfg)
 }
 
 fn run(args: &[&str]) -> Result<()> {
@@ -136,8 +140,9 @@ fn run_capture(args: &[&str], out_buf: &mut Zeroizing<Vec<u8>>) -> Result<()> {
 }
 
 /// Whether the sealed DEK exists (i.e. the TPM backend has been enrolled via
-/// `sctl install`). Used by `mount` to fall back to the legacy keyfile before
-/// enrollment (migration window) and by `check` for presence reporting.
+/// `sctl install`). Used by `mount` to decide whether to prompt for the
+/// gocryptfs password before enrollment (migration window) and by `check` for
+/// presence reporting.
 pub fn dek_exists(cfg: &Config) -> bool {
     let (priv_path, _) = dek_paths(&cfg.state_dir);
     priv_path.is_file()
@@ -159,34 +164,50 @@ pub fn seal_dek(dek: &[u8], cfg: &Config) -> Result<()> {
     let pub_s = pub_path.to_str().context("pub path")?;
     let priv_s = priv_path.to_str().context("priv path")?;
 
-    let seal = |prim_s: &str| {
-        run_stdin(
-            dek,
-            &[
-                "tpm2_create",
-                "-C",
-                prim_s,
-                "-i",
-                "-",
-                "-u",
-                pub_s,
-                "-r",
-                priv_s,
-            ],
-        )
-    };
-    // A stale persisted primary (TPM owner cleared) makes create fail; recreate
-    // the primary once and retry.
-    if seal(prim_s).is_err() {
-        let prim_ctx = recreate_primary(cfg)?;
-        let prim_s = prim_ctx.to_str().context("prim.ctx path")?;
-        seal(prim_s)?;
-    }
+    run_stdin(
+        dek,
+        &[
+            "tpm2_create",
+            "-C",
+            prim_s,
+            "-i",
+            "-",
+            "-u",
+            pub_s,
+            "-r",
+            priv_s,
+        ],
+    )
+    .context("sealing DEK into TPM (primary context established by ensure_primary)")?;
 
     // Restrictive perms regardless of umask: the `.priv` blob is the sealed DEK.
     std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600)).ok();
     std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600)).ok();
     Ok(())
+}
+
+/// Derive the X25519 identity used to wrap the secret map from the raw DEK.
+/// The DEK is a random 32-byte value, used directly as the X25519 scalar; the
+/// matching recipient is `to_public()`. This lets the map be sealed/opened via
+/// a fast X25519 key agreement (no scrypt KDF), unlike the escrow backend which
+/// wraps the map with the master passphrase.
+///
+/// `age::x25519::Identity` has no `From<[u8; 32]>` constructor, so we round-trip
+/// the DEK through age's own secret-key string encoding (base32 + bech32 with
+/// the `age-secret-key-` HRP), which is deterministic and reverses `to_string`.
+pub fn dek_identity(dek: &[u8]) -> Identity {
+    let sk_base32 = dek.to_base32();
+    let encoded = bech32::encode("age-secret-key-", sk_base32, Variant::Bech32)
+        .expect("HRP is valid")
+        .to_uppercase();
+    age::x25519::Identity::from_str(&encoded).expect("DEK is a valid X25519 scalar")
+}
+
+/// Seal the secret map under the DEK via X25519 (no scrypt), returning the
+/// age-encrypted bytes written to `tpm_map_file`.
+pub fn seal_map(map: &SecretMap, dek: &[u8]) -> Result<Vec<u8>> {
+    let recipient: Recipient = dek_identity(dek).to_public();
+    crate::escrow::seal_recipient(map, &recipient)
 }
 
 /// Unseal the DEK from the TPM (cached for the process session).
@@ -217,26 +238,18 @@ pub fn unseal_dek(cfg: &Config) -> Result<Zeroizing<Vec<u8>>> {
     let loaded = tmp.path().join("dek.ctx");
     let loaded_s = loaded.to_str().context("dek.ctx path")?;
 
-    let load = |prim_s: &str| {
-        run(&[
-            "tpm2_load",
-            "-C",
-            prim_s,
-            "-u",
-            pub_s,
-            "-r",
-            priv_s,
-            "-c",
-            loaded_s,
-        ])
-    };
-    // The persisted primary may be stale if the TPM owner was cleared; if load
-    // fails, recreate the primary and retry once.
-    if load(prim_s).is_err() {
-        let prim_ctx = recreate_primary(cfg)?;
-        let prim_s = prim_ctx.to_str().context("prim.ctx path")?;
-        load(prim_s)?;
-    }
+    run(&[
+        "tpm2_load",
+        "-C",
+        prim_s,
+        "-u",
+        pub_s,
+        "-r",
+        priv_s,
+        "-c",
+        loaded_s,
+    ])
+    .context("loading sealed DEK (primary context validated by ensure_primary)")?;
 
     let mut out = Zeroizing::new(Vec::new());
     run_capture(&["tpm2_unseal", "-c", loaded_s], &mut out)?;
@@ -256,11 +269,9 @@ mod tests {
         Config {
             home: PathBuf::from("/h"),
             state_dir: std::env::temp_dir().join("sctl-tpm-test"),
-            stray_dir: PathBuf::from("/c/stray"),
             enc_root: PathBuf::from("/e"),
-            keyfile: PathBuf::from("/c/key"),
             default_idle: None,
-            secret_backend: Some(SecretBackend::Tpm),
+            secret_backend: SecretBackend::Tpm,
             escrow_file: PathBuf::from("/c/sctl-escrow.age"),
             master_passphrase_file: None,
             tpm_pcr: false,

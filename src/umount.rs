@@ -25,7 +25,7 @@ pub struct UmountOpts {
 
 /// Unmount a single secret's container.
 pub fn umount_one(cfg: &Config, secret: &Secret, opts: UmountOpts) -> Result<()> {
-    let _lock = crate::lock::acquire(&cfg.state_dir, &secret.safe(), &secret.name)?;
+    let _lock = crate::lock::acquire(&cfg.runtime_dir(), &secret.safe(), &secret.name)?;
     let mnt = secret.mountpoint(&cfg.home);
     if !is_mounted(&mnt) {
         println!("{}: not mounted", secret.name);
@@ -44,7 +44,7 @@ pub fn umount_one(cfg: &Config, secret: &Secret, opts: UmountOpts) -> Result<()>
     sys::fuse_unmount(&mnt, opts.lazy)?;
     println!("unmounted: {}", secret.name);
     notify(opts.notify, &format!("Unmounted {}", secret.name));
-    state::clear(&cfg.state_dir, &secret.safe());
+    state::clear(&cfg.runtime_dir(), &secret.safe());
     sys::run_hooks("post_unmount", &secret.post_unmount)?;
     Ok(())
 }

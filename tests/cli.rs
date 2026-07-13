@@ -24,9 +24,7 @@ impl Sandbox {
         let p = dir.path();
         fs::create_dir_all(p.join("cfg/state")).unwrap();
         fs::create_dir_all(p.join("enc")).unwrap();
-        fs::write(p.join("cfg/key"), b"testpassword123").unwrap();
         let cfg = config.replace("$ENC", p.join("enc").to_str().unwrap());
-        let cfg = cfg.replace("$KEY", p.join("cfg/key").to_str().unwrap());
         fs::write(p.join("cfg/config.toml"), cfg).unwrap();
         Sandbox { dir }
     }
@@ -42,7 +40,11 @@ impl Sandbox {
             .env("SCTL_CONFIG", p.join("cfg/config.toml"))
             .env("SCTL_CONFIG_DIR", p.join("cfg"))
             .env("SCTL_STATE_DIR", p.join("cfg/state"))
-            .env("SCTL_COLOR", "never");
+            .env("SCTL_COLOR", "never")
+            // Non-interactive gocryptfs password (pre-install fallback) and
+            // master passphrase for the escrow backend.
+            .env("CRYPT_PASS", "testpassword123")
+            .env("SCTL_MASTER_PASS", "test-master-pass");
         c
     }
 
@@ -78,7 +80,7 @@ const BASE: &str = r#"
 [settings]
 default_idle = "10m"
 enc_root = "$ENC"
-keyfile = "$KEY"
+secret_backend = "escrow"
 
 [secrets.gpg]
 path = ".gnupg"
@@ -130,7 +132,7 @@ fn cycle_is_rejected() {
     let cfg = r#"
 [settings]
 enc_root = "$ENC"
-keyfile = "$KEY"
+secret_backend = "escrow"
 [secrets.a]
 path = "a"
 depends = ["b"]
@@ -159,11 +161,12 @@ fn completions_generate() {
 #[test]
 fn check_reports_uninitialized() {
     let sb = Sandbox::new(BASE);
-    // Backends are not initialized in the sandbox -> warnings, but exit 0.
+    // Backends are not initialized and the escrow file is absent -> errors,
+    // but the per-secret "not initialized" diagnostics are still reported.
     sb.cmd()
         .arg("check")
         .assert()
-        .success()
+        .failure()
         .stdout(predicates::str::contains("not initialized"));
 }
 
@@ -172,7 +175,7 @@ fn check_fails_on_duplicate_mountpoint() {
     let cfg = r#"
 [settings]
 enc_root = "$ENC"
-keyfile = "$KEY"
+secret_backend = "escrow"
 [secrets.a]
 path = "same"
 [secrets.b]
@@ -279,7 +282,7 @@ fn shared_dependency_is_kept() {
     let cfg = r#"
 [settings]
 enc_root = "$ENC"
-keyfile = "$KEY"
+secret_backend = "escrow"
 [secrets.gpg]
 path = ".gnupg"
 [secrets.mail]

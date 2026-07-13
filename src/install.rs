@@ -1,10 +1,13 @@
 //! `sctl install`: enroll every managed secret into the configured backend.
 //!
 //! This is the single writer. It:
-//!   1. adopts the shared gocryptfs key `G` from the existing keyfile,
+//!   1. prompts for the shared gocryptfs password `G` (or reads `CRYPT_PASS`),
 //!   2. collects each `gpg_preset` gpg home's primary-key passphrase,
-//!   3. seals every entry into the TPM (when `secret_backend = "tpm"`), and
-//!   4. writes the age/scrypt escrow container atomically.
+//!   3. seals every entry into the chosen backend:
+//!      - `tpm`: a random DEK into the TPM, the map wrapped by the DEK (X25519,
+//!        no scrypt); no master passphrase required,
+//!      - `escrow`: the map wrapped by the master passphrase (scrypt) into the
+//!        escrow file.
 //!
 //! NOTE on gpg passphrase rotation (docs/SECRETS.md §11.6): gpg 2.5.x cannot
 //! non-interactively change a key's passphrase to a *different* value via the
@@ -20,8 +23,6 @@ use crate::gpg;
 use crate::secret;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
 use rand::{Rng, rng};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -31,9 +32,6 @@ use zeroize::Zeroizing;
 pub struct InstallOpts {
     /// Restrict enrollment to these secret names (empty = all managed).
     pub names: Vec<String>,
-    /// Interactive mode (key selection picker; deferred, see docs §11.4).
-    #[allow(dead_code)]
-    pub interactive: bool,
 }
 
 /// Source of an existing gpg key passphrase. Abstracted so tests can supply a
@@ -95,7 +93,6 @@ impl GpgPassProvider for PromptProvider {
 }
 
 /// Known-value provider for tests.
-#[allow(dead_code)]
 pub struct ConstProvider<'a> {
     pub pass: &'a str,
 }
@@ -113,27 +110,52 @@ impl GpgPassProvider for ConstProvider<'_> {
     }
 }
 
+/// Source of the shared gocryptfs password `G`. Abstracted so tests can supply a
+/// known value without an interactive prompt.
+pub trait GocryptfsKeyProvider {
+    fn get(&self) -> Result<Zeroizing<Vec<u8>>>;
+}
+
+/// Real provider: prompt on the terminal (confirmed), or read `CRYPT_PASS`.
+pub struct PromptKey;
+
+impl GocryptfsKeyProvider for PromptKey {
+    fn get(&self) -> Result<Zeroizing<Vec<u8>>> {
+        let g = crate::passfile::read_password("gocryptfs container", true)?;
+        if g.is_empty() {
+            bail!("gocryptfs password is empty");
+        }
+        Ok(g)
+    }
+}
+
+/// Known-value provider for tests.
+pub struct ConstKey<'a> {
+    pub key: &'a [u8],
+}
+
+impl GocryptfsKeyProvider for ConstKey<'_> {
+    fn get(&self) -> Result<Zeroizing<Vec<u8>>> {
+        Ok(Zeroizing::new(self.key.to_vec()))
+    }
+}
+
 /// Build the secret map to enroll.
 ///
 /// `names` restricts which `gpg_preset` gpg homes are enrolled (empty = all). The
-/// shared gocryptfs key is always enrolled.
+/// shared gocryptfs key is always enrolled (from `g_provider`).
 pub fn build_map(
     cfg: &Config,
+    g_provider: &dyn GocryptfsKeyProvider,
     provider: &dyn GpgPassProvider,
     names: &[String],
 ) -> Result<escrow::SecretMap> {
     let mut map = escrow::SecretMap::new();
 
-    // Shared gocryptfs key G: adopt the existing keyfile bytes.
-    let g = Zeroizing::new(
-        std::fs::read(&cfg.keyfile)
-            .with_context(|| format!("reading keyfile {}", cfg.keyfile.display()))?,
-    );
+    // Shared gocryptfs key G: prompt for it (or read CRYPT_PASS).
+    let g = g_provider.get()?;
     if g.is_empty() {
-        bail!(
-            "keyfile {} is empty; run `sctl init` for at least one secret first",
-            cfg.keyfile.display()
-        );
+        bail!("gocryptfs password is empty");
     }
     map.insert(secret::composite_key("gocryptfs", "__shared__"), g);
 
@@ -171,35 +193,43 @@ pub fn build_map(
     Ok(map)
 }
 
-/// Persist the secret map into the configured backend(s).
+/// Persist the secret map into the configured backend.
 ///
-/// Always writes the escrow container (age/scrypt, master passphrase) as the
-/// portable recovery copy. In TPM mode additionally: generate a random 32-byte
-/// DEK, seal it into the TPM, and write the *same* map wrapped by that DEK to
-/// `tpm_map_file` (identical age format, DEK instead of the master passphrase).
-/// A single `tpm2_unseal` of the DEK then decrypts the whole map at mount time.
+/// - **TPM**: generate a random 32-byte DEK, seal it into the TPM, and write the
+///   map wrapped by the DEK (X25519, no scrypt) to `tpm_map_file`. A single
+///   `tpm2_unseal` of the DEK then decrypts the whole map at mount time. In
+///   addition, an `escrow_file` (master-passphrase, scrypt) backup copy is
+///   written so the secrets remain recoverable if the TPM ever breaks — it is
+///   only read by `sctl recovery`, never on the daily TPM mount path.
+/// - **Escrow**: wrap the map with the master passphrase (scrypt) into
+///   `escrow_file`.
 ///
 /// All files are written atomically (tmp + rename) with `0600` perms. `finalize`
-/// is the sole writer, so the two copies stay consistent (see docs §6).
+/// is the sole writer (see docs §6).
 pub fn finalize(cfg: &Config, map: &escrow::SecretMap) -> Result<()> {
-    // Recovery copy: escrow wrapped by the master passphrase.
-    let master = secret::read_master_passphrase(cfg)?;
-    let escrow_blob = escrow::seal(map, &master).context("sealing escrow container")?;
-    write_atomic(&cfg.escrow_file, &escrow_blob)?;
+    match cfg.secret_backend {
+        SecretBackend::Tpm => {
+            let mut dek = Zeroizing::new(vec![0u8; 32]);
+            rng().fill_bytes(dek.as_mut_slice());
+            tpm::seal_dek(&dek, cfg).context("sealing DEK into TPM")?;
+            let blob = tpm::seal_map(map, &dek).context("sealing TPM map with DEK")?;
+            std::fs::create_dir_all(cfg.tpm_dir())
+                .with_context(|| format!("creating {}", cfg.tpm_dir().display()))?;
+            write_atomic(&cfg.tpm_map_file(), &blob)?;
 
-    // Fast path: TPM-sealed DEK + DEK-wrapped map (same format as escrow).
-    if let Some(SecretBackend::Tpm) = cfg.secret_backend {
-        let mut dek = Zeroizing::new(vec![0u8; 32]);
-        rng().fill_bytes(dek.as_mut_slice());
-        tpm::seal_dek(&dek, cfg).context("sealing DEK into TPM")?;
-
-        let dek_pass = Zeroizing::new(B64.encode(dek.as_slice()));
-        let tpm_blob = escrow::seal(map, &dek_pass).context("sealing TPM map with DEK")?;
-        std::fs::create_dir_all(cfg.tpm_dir())
-            .with_context(|| format!("creating {}", cfg.tpm_dir().display()))?;
-        write_atomic(&cfg.tpm_map_file(), &tpm_blob)?;
+            // Recovery backup: master-passphrase copy, read only by `sctl recovery`.
+            let master = secret::read_master_passphrase(cfg)?;
+            let escrow_blob = escrow::seal(map, &master).context("sealing escrow backup")?;
+            write_atomic(&cfg.escrow_file, &escrow_blob)?;
+            Ok(())
+        }
+        SecretBackend::Escrow => {
+            let master = secret::read_master_passphrase(cfg)?;
+            let blob = escrow::seal(map, &master).context("sealing escrow container")?;
+            write_atomic(&cfg.escrow_file, &blob)?;
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Write `data` to `path` atomically (tmp + rename) with `0600` permissions,
@@ -215,18 +245,12 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 
 /// CLI entry: enroll the configured secrets.
 pub fn run(cfg: &Config, opts: &InstallOpts) -> Result<()> {
-    if cfg.secret_backend.is_none() {
-        bail!(
-            "secret_backend is not set; add `secret_backend = \"tpm\"` or \
-             `secret_backend = \"escrow\"` to [settings] in the config"
-        );
-    }
     if !opts.names.is_empty() {
         for n in &opts.names {
             cfg.get(n)?;
         }
     }
-    let map = build_map(cfg, &PromptProvider, &opts.names)?;
+    let map = build_map(cfg, &PromptKey, &PromptProvider, &opts.names)?;
     finalize(cfg, &map)?;
     eprintln!("installed {} secret(s) into the backend", map.len());
     Ok(())
@@ -252,11 +276,9 @@ mod tests {
         Config {
             home: PathBuf::from("/h"),
             state_dir: dir.clone(),
-            stray_dir: PathBuf::from("/c/stray"),
             enc_root: PathBuf::from("/e"),
-            keyfile: PathBuf::from("/c/key"),
             default_idle: None,
-            secret_backend: Some(backend),
+            secret_backend: backend,
             escrow_file: dir.join("escrow.age"),
             master_passphrase_file: None,
             tpm_pcr: false,
@@ -293,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_then_recovery_roundtrip_tpm() {
+    fn finalize_then_resolve_tpm() {
         let cfg = base_cfg(SecretBackend::Tpm);
         let _ = std::fs::remove_dir_all(&cfg.state_dir);
         std::fs::create_dir_all(&cfg.state_dir).unwrap();
@@ -305,10 +327,11 @@ mod tests {
         map.insert("gocryptfs:__shared__".into(), rand_bytes(24));
         finalize(&cfg, &map).unwrap();
 
-        let recovered = recovery::read_map(&cfg).unwrap();
-        assert_eq!(recovered.len(), 1);
+        // TPM backend does not write an escrow recovery file; verify via the TPM
+        // resolution path instead.
+        let recovered = secret::resolve_secret(&cfg, "gocryptfs", "__shared__").unwrap();
         assert_eq!(
-            recovered.get("gocryptfs:__shared__").unwrap().as_slice(),
+            recovered.as_slice(),
             map.get("gocryptfs:__shared__").unwrap().as_slice()
         );
     }

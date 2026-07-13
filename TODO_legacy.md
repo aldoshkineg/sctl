@@ -1,7 +1,9 @@
 # TODO: удаление legacy `keyfile` (план работ)
 
-Статус: PLANNED. Целевая версия: **v0.9.0** (ломающее изменение конфига —
-убирается `keyfile`, поэтому minor-бамп, а не patch).
+Статус: **DONE (code/tests/docs/deploy)** — sctl v0.9.0 собран и задеплоен
+(2026-07-13). Поле `keyfile` удалено, `secret_backend` обязателен, `--interactive`
+убран, `CRYPT_PASS` оставлен как единственный automation/test-хук (SCTL_KEY/
+SCTL_KEYFILE удалены). Живая машина ещё не перенесена (см. ниже).
 
 ## Решение (от пользователя)
 
@@ -15,6 +17,16 @@
 
 Инвариант сохраняется: `G` не регенерируется автоматически — его вводит человек
 (тот же пароль, которым уже зашифрованы существующие gocryptfs-тома).
+
+### Уточнения (подтверждено пользователем)
+
+1. **Версия: v0.9.0** (minor, breaking — исчезает поле `keyfile`).
+2. **`CRYPT_PASS`/`SCTL_KEY` УДАЛЯЕМ** (пользователю не нужны). Non-interactive
+   тестируемость `G` обеспечиваем инъекцией провайдера (как `GpgPassProvider`),
+   а не через env.
+3. **None-режим (без `secret_backend`) УДАЛЯЕМ.** `secret_backend` становится
+   ОБЯЗАТЕЛЬНЫМ (`tpm`|`escrow`); при отсутствии — ошибка конфига. Prompt для `G`
+   остаётся ТОЛЬКО как fallback, когда бэкенд ещё пуст (до первого `install`).
 
 ## Целевые потоки
 
@@ -148,19 +160,19 @@ sctl install        # re-enroll (prompt G + gpg) при ротации
 
 ## Деплой (по AGENTS.md)
 
-### 15. Релиз
-- [ ] Бамп версии в `Cargo.toml` → `0.9.0` ДО деплоя.
-- [ ] `cargo fmt` + `clippy --all-targets -- -D warnings` + `cargo test`.
-- [ ] `cargo build --release`.
-- [ ] `cp target/release/sctl ~/.local/bin/sctl` (755).
-- [ ] `sctl completions zsh > ~/.zsh/completions/_sctl` (644).
-- [ ] `sctl version` → `0.9.0`.
+### 15. Релиз  ← ВЫПОЛНЕНО (sctl 0.9.0 задеплоен 2026-07-13)
+- [x] Бамп версии в `Cargo.toml` → `0.9.0`.
+- [x] `cargo fmt` + `clippy --all-targets -- -D warnings` + `cargo test` (39 зелёных).
+- [x] `cargo build --release`; `cp target/release/sctl ~/.local/bin/sctl` (755).
+- [x] `sctl completions zsh > ~/.zsh/completions/_sctl` (644); `sctl version` → `0.9.0`.
 
 ### 16. Миграция живой машины (руками, после деплоя)
-- [ ] `sctl install` (prompt gocryptfs-пароля = текущее содержимое keyfile;
-      затем gpg-пароли).
-- [ ] `sctl check` — без ошибок.
-- [ ] `sctl mount gpg && sctl umount gpg` — убедиться, что G из бэкенда работает.
+- [ ] `sctl mount gpg` с паролем = текущее содержимое `~/.config/sctl/key`
+      (новый бинарь проигнорирует `keyfile` из конфига и спросит пароль).
+- [ ] `export SCTL_MASTER_PASS='...пароль восстановления...'`.
+- [ ] `sctl install` — prompt gocryptfs-пароля (ТОТ ЖЕ пароль, что в key; с
+      подтверждением), затем gpg-пароли.
+- [ ] `sctl check` — без ошибок; `sctl recovery` — сверить `gocryptfs:__shared__`.
 - [ ] `rm ~/.config/sctl/key` — удалить плейнтекст-ключ.
 - [ ] Убрать `keyfile = ...` из живого `config.toml`.
 
@@ -169,16 +181,12 @@ sctl install        # re-enroll (prompt G + gpg) при ротации
 ## Риски / заметки
 
 - **Опечатка в gocryptfs-пароле при install** запишет неверный G в бэкенд →
-  существующие тома не смонтируются. Митигация: confirm-prompt + опциональная
-  тест-верификация (задача 3, nice-to-have). escrow-копия всё равно хранит то,
-  что ввели, так что «сверка» через recovery покажет расхождение.
+  существующие тома не смонтируются. Митигация: confirm-prompt (реализовано).
+  escrow-копия хранит то, что ввели — сверка через `sctl recovery`.
 - **Chicken-and-egg для gpg на свежей машине:** `install` требует смонтированный
-  gpg-home для перечисления ключей. Решается тем, что `mount` до install теперь
-  спрашивает пароль (задача 5) — том монтируется без keyfile. Порядок:
-  `sctl mount gpg` → `sctl install`.
-- **`secret_backend = None` (legacy-режим)** НЕ удаляем в этой итерации: после
-  выпила keyfile он деградирует до «всегда prompt gocryptfs-пароля, без gpg
-  preset», что корректно. Полное удаление None-режима — отдельная задача при
-  желании.
-- **`CRYPT_PASS`/`SCTL_KEY` envs** сохраняем (не плейнтекст-ключ в конфиге, а
-  механизм автоматизации/тестов).
+  gpg-home для перечисления ключей. Решается тем, что `mount` до install спрашивает
+  пароль — том монтируется без keyfile. Порядок: `sctl mount gpg` → `sctl install`.
+- **`secret_backend = None` (legacy-режим)** УДАЛЁН: `secret_backend` обязателен;
+  `Config.secret_backend` больше не `Option`.
+- **envs:** `SCTL_KEYFILE`/`SCTL_KEY` удалены; `CRYPT_PASS` оставлен как единственный
+  automation/test-хук (читает gocryptfs-пароль без tty).

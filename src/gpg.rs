@@ -5,11 +5,11 @@
 //! gpg-agent via `gpg-preset-passphrase`, so the user is not prompted on every
 //! mount.
 //!
-//! In backend mode (`secret_backend` set + per-secret `gpg_preset`) the
-//! passphrases come from the secret backend via `secret::resolve_secret`;
-//! otherwise (legacy/manual) nothing is preloaded and gpg falls back to an
-//! interactive prompt. The historical `.common-seed` seed-file mechanism has
-//! been removed (see docs/SECRETS.md §6/§8).
+//! In backend mode the passphrases come from the secret backend via
+//! `secret::resolve_secret` for each secret that opts in with `gpg_preset`;
+//! secrets without `gpg_preset` are left for gpg to prompt interactively. The
+//! historical `.common-seed` seed-file mechanism has been removed (see
+//! docs/SECRETS.md §6/§8).
 
 use crate::config::{Config, Secret};
 use crate::procfs;
@@ -21,13 +21,13 @@ use std::process::{Command, Stdio};
 
 /// Preset passphrases for all enrolled secret keys in the secret's gnupg home.
 ///
-/// - Backend mode (`secret_backend` set + `gpg_preset`): resolve each primary
-///   key's passphrase from the backend and preset it (plus its subkeys) into
-///   gpg-agent. Best-effort: individual failures are warnings.
-/// - Otherwise (legacy/manual): no-op — gpg prompts interactively.
+/// - With `gpg_preset`: resolve each primary key's passphrase from the backend
+///   and preset it (plus its subkeys) into gpg-agent. Best-effort: individual
+///   failures are warnings.
+/// - Without `gpg_preset`: no-op — gpg prompts interactively.
 pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
-    if cfg.secret_backend.is_none() || !secret.gpg_preset {
-        // Legacy or manual mode: nothing to preload automatically.
+    if !secret.gpg_preset {
+        // Not backend-managed: nothing to preload automatically.
         return Ok(());
     }
 

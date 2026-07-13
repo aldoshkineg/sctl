@@ -6,8 +6,6 @@ use crate::config::{Config, SecretBackend};
 use crate::escrow;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -51,14 +49,14 @@ pub fn gpg_id_tail(name: &str, fpr: &str) -> String {
     format!("{name}:{fpr}")
 }
 
-/// Whether the backend has not been enrolled yet (so `mount` may fall back to
-/// the legacy `keyfile` during the pre-`install` migration window). Real unseal
-/// failures on an *enrolled* backend still propagate through [`resolve_secret`].
+/// Whether the backend has not been enrolled yet (so `mount`/`init` may prompt
+/// for the gocryptfs password during the pre-`install` migration window). Real
+/// unseal failures on an *enrolled* backend still propagate through
+/// [`resolve_secret`].
 pub fn backend_missing(cfg: &Config) -> bool {
     match cfg.secret_backend {
-        Some(SecretBackend::Tpm) => !tpm::dek_exists(cfg) || !cfg.tpm_map_file().exists(),
-        Some(SecretBackend::Escrow) => !cfg.escrow_file.exists(),
-        None => false,
+        SecretBackend::Tpm => !tpm::dek_exists(cfg) || !cfg.tpm_map_file().exists(),
+        SecretBackend::Escrow => !cfg.escrow_file.exists(),
     }
 }
 
@@ -72,9 +70,8 @@ pub fn backend_missing(cfg: &Config) -> bool {
 /// - **Escrow**: the master passphrase decrypts `escrow_file`.
 pub fn resolve_all(cfg: &Config) -> Result<SecretMap> {
     match cfg.secret_backend {
-        Some(SecretBackend::Tpm) => tpm_map(cfg),
-        Some(SecretBackend::Escrow) => escrow_map(cfg),
-        None => bail!("resolve called in legacy mode (no secret_backend configured)"),
+        SecretBackend::Tpm => tpm_map(cfg),
+        SecretBackend::Escrow => escrow_map(cfg),
     }
 }
 
@@ -98,10 +95,10 @@ fn tpm_map(cfg: &Config) -> Result<SecretMap> {
         return Ok(m);
     }
     let dek = tpm::unseal_dek(cfg).context("unsealing DEK from TPM")?;
-    let dek_pass = Zeroizing::new(B64.encode(dek.as_slice()));
+    let id = tpm::dek_identity(&dek);
     let blob =
         std::fs::read(&path).with_context(|| format!("reading TPM map {}", path.display()))?;
-    let map = escrow::open(&blob, &dek_pass).context("decrypting TPM map with DEK")?;
+    let map = escrow::open_identity(&blob, &id).context("decrypting TPM map with DEK")?;
     Ok(store_map(path, map))
 }
 
@@ -184,11 +181,9 @@ mod tests {
         Config {
             home: PathBuf::from("/h"),
             state_dir,
-            stray_dir: PathBuf::from("/c/stray"),
             enc_root: PathBuf::from("/e"),
-            keyfile: PathBuf::from("/c/key"),
             default_idle: None,
-            secret_backend: Some(backend),
+            secret_backend: backend,
             escrow_file,
             master_passphrase_file: None,
             tpm_pcr: false,
@@ -252,8 +247,7 @@ mod tests {
         let mut dek = Zeroizing::new(vec![0u8; 32]);
         rand::rng().fill_bytes(dek.as_mut_slice());
         tpm::seal_dek(&dek, &cfg).unwrap();
-        let dek_pass = Zeroizing::new(B64.encode(dek.as_slice()));
-        let blob = escrow::seal(&map, &dek_pass).unwrap();
+        let blob = tpm::seal_map(&map, &dek).unwrap();
         std::fs::write(cfg.tpm_map_file(), blob).unwrap();
 
         let got = resolve_secret(&cfg, "gocryptfs", "__shared__").unwrap();

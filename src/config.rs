@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Global secret backend selector.
@@ -39,9 +40,7 @@ struct RawConfig {
 struct RawSettings {
     default_idle: Option<String>,
     enc_root: Option<String>,
-    keyfile: Option<String>,
-    /// Global secret backend: "tpm" | "escrow". Unset = legacy (plaintext
-    /// keyfile + manual gpg entry).
+    /// Global secret backend: "tpm" | "escrow". Required.
     secret_backend: Option<String>,
     /// Encrypted escrow container (age/scrypt) holding the full secret map.
     escrow_file: Option<String>,
@@ -128,12 +127,10 @@ impl Secret {
 pub struct Config {
     pub home: PathBuf,
     pub state_dir: PathBuf,
-    pub stray_dir: PathBuf,
     pub enc_root: PathBuf,
-    pub keyfile: PathBuf,
     pub default_idle: Option<String>,
-    /// Global secret backend (None = legacy mode).
-    pub secret_backend: Option<SecretBackend>,
+    /// Global secret backend (required: TPM or escrow).
+    pub secret_backend: SecretBackend,
     /// Encrypted escrow container path (age/scrypt).
     pub escrow_file: PathBuf,
     /// Master passphrase file path (emergency only).
@@ -189,17 +186,14 @@ impl Config {
             .unwrap_or_else(|| "~/.encrypted".to_string());
         let enc_root = expand_tilde(&enc_root, &home);
 
-        // keyfile: env > config > default (<config_dir>/key)
-        let keyfile = env::var("SCTL_KEYFILE")
-            .ok()
-            .or(raw.settings.keyfile)
-            .map(|k| expand_tilde(&k, &home))
-            .unwrap_or_else(|| config_dir.join("key"));
-
-        // secret_backend: parse "tpm"/"escrow", else legacy (None).
+        // secret_backend: required ("tpm" | "escrow").
         let secret_backend = match raw.settings.secret_backend {
-            Some(ref s) => Some(SecretBackend::parse(s)?),
-            None => None,
+            Some(ref s) => SecretBackend::parse(s)?,
+            None => bail!(
+                "secret_backend is not set; add `secret_backend = \"tpm\"` or \
+                 `secret_backend = \"escrow\"` to [settings] in {}",
+                config_file.display()
+            ),
         };
         // escrow_file: config > default (<config_dir>/sctl-escrow.age).
         let escrow_file = raw
@@ -220,9 +214,6 @@ impl Config {
             .ok()
             .or(raw.settings.default_idle)
             .filter(|s| !s.is_empty());
-
-        let stray_dir =
-            env_path("SCTL_STRAY_DIR").unwrap_or_else(|| home.join(".local/share/sctl/stray"));
 
         let mut secrets = BTreeMap::new();
         for (name, r) in raw.secrets {
@@ -249,9 +240,7 @@ impl Config {
         let cfg = Config {
             home,
             state_dir,
-            stray_dir,
             enc_root,
-            keyfile,
             default_idle,
             secret_backend,
             escrow_file,
@@ -303,15 +292,47 @@ impl Config {
     /// runtime directory (tmpfs), NOT under `state_dir`: a saved TPM context is
     /// encrypted with a context key that the TPM regenerates on every reset, so
     /// the file is only valid within a single boot session and is regenerated on
-    /// the first mount after each reboot anyway. It is not secret material. The
-    /// filename is namespaced by a hash of `state_dir` so distinct configs (and
-    /// parallel tests) do not collide on the shared runtime directory.
+    /// the first mount after each reboot anyway. It is not secret material.
+    ///
+    /// The filename is **deterministically** namespaced by a hash of
+    /// `state_dir` (so distinct configs and parallel tests do not collide and a
+    /// given config reuses the same file across calls) — note we hash the path
+    /// bytes directly, because `std::collections::hash_map::DefaultHasher` mixes
+    /// the hasher object's address into its seed and would otherwise produce a
+    /// different filename on every call.
     pub fn primary_ctx_file(&self) -> PathBuf {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.state_dir.hash(&mut h);
-        runtime_dir().join(format!("prim-{:016x}.ctx", h.finish()))
+        let h = fnv1a_64(self.state_dir.as_os_str().to_string_lossy().as_bytes());
+        self.runtime_dir().join(format!("prim-{h:016x}.ctx"))
     }
+
+    /// Directory for all ephemeral per-boot runtime state (advisory locks, idle
+    /// countdowns, busy markers, stray files, TPM saved contexts). Prefers
+    /// `$XDG_RUNTIME_DIR/sctl` (a per-user tmpfs, mode 0700, wiped on
+    /// logout/reboot — exactly matching this data's lifetime); falls back to
+    /// `<tmp>/sctl-<uid>` when `XDG_RUNTIME_DIR` is unset (e.g. cron sessions).
+    /// Created on demand with mode 0700.
+    pub fn runtime_dir(&self) -> PathBuf {
+        let dir = runtime_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        dir
+    }
+
+    /// Subdir of `runtime_dir()` for stray files left aside on a busy unmount
+    /// (ephemeral; cleared on reboot along with the rest of the runtime dir).
+    pub fn stray_dir(&self) -> PathBuf {
+        self.runtime_dir().join("stray")
+    }
+}
+
+/// Deterministic FNV-1a 64-bit hash of `data` (no per-call randomization).
+fn fnv1a_64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
 }
 
 /// Base runtime directory for ephemeral, per-boot state. Prefers

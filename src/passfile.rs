@@ -19,60 +19,54 @@ impl Passfile {
     }
 }
 
-/// Resolve a password for `name` and write it to a fresh 0600 temp file.
-///
-/// Source order: `CRYPT_PASS` env, `SCTL_KEY` file, configured `keyfile`, then
-/// an interactive prompt (with confirmation).
-pub fn resolve(name: &str, keyfile: &Path) -> Result<Passfile> {
-    let mut tmp = NamedTempFile::new().context("creating temp passfile")?;
+fn new_tmp() -> Result<NamedTempFile> {
+    let tmp = NamedTempFile::new().context("creating temp passfile")?;
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))?;
-
-    if let Some(pass) = env::var_os("CRYPT_PASS") {
-        tmp.write_all(pass.as_encoded_bytes())?;
-    } else if let Some(keyenv) = env::var_os("SCTL_KEY").filter(|k| !k.is_empty()) {
-        let p = Path::new(&keyenv);
-        if p.is_file() {
-            let data = Zeroizing::new(
-                std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
-            );
-            tmp.write_all(&data)?;
-        } else {
-            copy_or_prompt(&mut tmp, keyfile, name)?;
-        }
-    } else {
-        copy_or_prompt(&mut tmp, keyfile, name)?;
-    }
-
-    tmp.flush()?;
-    Ok(Passfile { inner: tmp })
+    Ok(tmp)
 }
 
-/// Write already-resolved secret bytes to a fresh 0600 temp passfile (used by
-/// the secret backend path: `secret::resolve_secret` -> gocryptfs passfile).
+/// Write already-resolved secret bytes to a fresh 0600 temp passfile. Used by
+/// the secret-backend path (`secret::resolve_secret` -> gocryptfs passfile) and
+/// by the interactive prompt fallbacks below.
 pub fn from_bytes(data: &[u8]) -> Result<Passfile> {
-    let mut tmp = NamedTempFile::new().context("creating temp passfile")?;
-    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))?;
+    let mut tmp = new_tmp()?;
     tmp.write_all(data)?;
     tmp.flush()?;
     Ok(Passfile { inner: tmp })
 }
 
-fn copy_or_prompt(tmp: &mut NamedTempFile, keyfile: &Path, name: &str) -> Result<()> {
-    if keyfile.is_file() {
-        let data = Zeroizing::new(
-            std::fs::read(keyfile).with_context(|| format!("reading {}", keyfile.display()))?,
-        );
-        tmp.write_all(&data)?;
-        return Ok(());
+/// The `CRYPT_PASS` env override (automation / tests): a non-interactive source
+/// for the gocryptfs password so unattended runs and the test suite do not need
+/// a tty. It is not persisted anywhere.
+fn crypt_pass_env() -> Option<Zeroizing<Vec<u8>>> {
+    env::var_os("CRYPT_PASS").map(|v| Zeroizing::new(v.as_encoded_bytes().to_vec()))
+}
+
+/// Resolve the gocryptfs password for `name`: the `CRYPT_PASS` env override if
+/// set, otherwise an interactive prompt. When `confirm` is true the prompt is
+/// asked twice and must match (used by `init`, which *creates* a container and
+/// so must not silently record a typo'd password).
+pub fn read_password(name: &str, confirm: bool) -> Result<Zeroizing<Vec<u8>>> {
+    if let Some(pw) = crypt_pass_env() {
+        return Ok(pw);
     }
     let pw1 = Zeroizing::new(
         rpassword::prompt_password(format!("Password for '{name}': "))
             .context("reading password")?,
     );
-    let pw2 = Zeroizing::new(rpassword::prompt_password("Confirm: ").context("reading password")?);
-    if *pw1 != *pw2 {
-        bail!("passwords do not match");
+    if confirm {
+        let pw2 =
+            Zeroizing::new(rpassword::prompt_password("Confirm: ").context("reading password")?);
+        if *pw1 != *pw2 {
+            bail!("passwords do not match");
+        }
     }
-    tmp.write_all(pw1.as_bytes())?;
-    Ok(())
+    Ok(Zeroizing::new(pw1.as_bytes().to_vec()))
+}
+
+/// Resolve the gocryptfs password (see [`read_password`]) and write it to a
+/// fresh 0600 temp passfile.
+pub fn prompt(name: &str, confirm: bool) -> Result<Passfile> {
+    let pw = read_password(name, confirm)?;
+    from_bytes(&pw)
 }

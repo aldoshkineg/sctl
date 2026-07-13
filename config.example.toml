@@ -7,8 +7,19 @@
 default_idle = "15m"
 # Directory holding the gocryptfs backends (one subdir per secret).
 enc_root = "~/.encrypted"
-# Shared passfile used to unlock containers (falls back to prompt if absent).
-keyfile = "~/.config/sctl/key"
+# Secret backend (REQUIRED): "tpm" or "escrow". Holds the shared gocryptfs
+# password `G` (and any gpg_preset key passphrases). `sctl install` prompts for
+# `G` once and seals it here; `mount` reads it back with zero prompts.
+#   tpm    - seal secrets to this machine's TPM (unlock with no input).
+#   escrow - decrypt secrets from `escrow_file` with the master passphrase.
+secret_backend = "tpm"
+# Recovery/portable copy (age/scrypt) wrapped by the master passphrase. Always
+# written by `install`; it is the sole backend for `secret_backend = "escrow"`.
+# Defaults to <config_dir>/sctl-escrow.age.
+# escrow_file = "~/.config/sctl/sctl-escrow.age"
+# Master passphrase source for the escrow copy: env SCTL_MASTER_PASS, then this
+# file, then an interactive prompt. Emergency use only.
+# master_passphrase_file = "~/.config/sctl/master.pass"
 
 # --- Secrets ---------------------------------------------------------------
 # Each [secrets.NAME] maps a cleartext mountpoint (path, relative to $HOME) to
@@ -24,7 +35,7 @@ gpg = true
 # Backend-manage this gpg home: `install` enrolls its key passphrases into the
 # secret backend (TPM or escrow, selected by `secret_backend`), and `mount`
 # preloads them into gpg-agent from the backend — so you are never prompted.
-# Without `secret_backend` (legacy) this is a no-op and gpg prompts manually.
+# Without `gpg_preset` this gpg home is not managed and gpg prompts manually.
 # Requires `allow-preset-passphrase` in the volume's gpg-agent.conf.
 # At `sctl install` each key in this home is prompted for its passphrase; press
 # Enter on an empty prompt to skip a key (it is left out of the backend).

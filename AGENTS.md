@@ -25,5 +25,7 @@ Deploy checklist:
 - **No `#![allow(dead_code)]`** anywhere. Resolve dead code by splitting
   fixtures, underscore-prefixed `_`-fields for owned-but-unused handles, and
   guard-style control flow (`let ... else` + `continue`).
-- Avoid `let ... && let ...` let-chains — rustfmt cannot format them and clippy
-  flags `collapsible_if`. Use `let ... else` + guard `continue` instead.
+- **let-chains (`if ... && let ...`)** are allowed: they are stable in Rust
+  1.89 / edition 2024, and both rustfmt and clippy accept them (used in
+  `mount.rs`, `tpm.rs`, `procfs.rs`). Prefer them over nested `if let` where they
+  read clearly; `let ... else` + guard `continue` remains fine too.

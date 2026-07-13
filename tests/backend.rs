@@ -9,7 +9,7 @@
 mod common;
 
 use sctl::config::{Config, Secret, SecretBackend};
-use sctl::install::{ConstProvider, build_map, finalize};
+use sctl::install::{ConstKey, ConstProvider, build_map, finalize};
 use sctl::recovery;
 use sctl::secret;
 use std::path::Path;
@@ -19,12 +19,11 @@ const MASTER: &str = "test-master-pass";
 const G: &[u8] = b"shared-gocryptfs-key-material-bytes";
 const PASS: &str = "fixture-key-passphrase";
 
-/// Build a config pointing at an isolated gpg home (fixture) with a shared
-/// gocryptfs key adopted from `keyfile`.
+/// Build a config pointing at an isolated gpg home (fixture). The shared
+/// gocryptfs key is supplied to `build_map` via a `ConstKey` provider.
 fn cfg_for(
     backend: SecretBackend,
     state_dir: &Path,
-    keyfile: &Path,
     escrow_file: &Path,
     gpg_home: &Path,
 ) -> Config {
@@ -50,11 +49,9 @@ fn cfg_for(
     Config {
         home: PathBuf::from("/"),
         state_dir: state_dir.to_path_buf(),
-        stray_dir: state_dir.join("stray"),
         enc_root: state_dir.join("enc"),
-        keyfile: keyfile.to_path_buf(),
         default_idle: None,
-        secret_backend: Some(backend),
+        secret_backend: backend,
         escrow_file: escrow_file.to_path_buf(),
         master_passphrase_file: None,
         tpm_pcr: false,
@@ -107,19 +104,17 @@ fn install_recovery_roundtrip_escrow() {
     let dir = std::env::temp_dir().join(format!("sctl-beh-escrow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let keyfile = dir.join("key");
-    std::fs::write(&keyfile, G).unwrap();
     let escrow_file = dir.join("sctl-escrow.age");
 
-    let cfg = cfg_for(
-        SecretBackend::Escrow,
-        &dir,
-        &keyfile,
-        &escrow_file,
-        &home.home,
-    );
+    let cfg = cfg_for(SecretBackend::Escrow, &dir, &escrow_file, &home.home);
 
-    let map = build_map(&cfg, &ConstProvider { pass: PASS }, &[]).unwrap();
+    let map = build_map(
+        &cfg,
+        &ConstKey { key: G },
+        &ConstProvider { pass: PASS },
+        &[],
+    )
+    .unwrap();
     assert_eq!(map.get("gocryptfs:__shared__").unwrap().as_slice(), G);
     assert_eq!(
         map.get(&format!("gpg:gpg:{fpr}")).unwrap().as_slice(),
@@ -159,13 +154,17 @@ fn install_resolve_secret_tpm_no_desync() {
     let dir = std::env::temp_dir().join(format!("sctl-beh-tpm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let keyfile = dir.join("key");
-    std::fs::write(&keyfile, G).unwrap();
     let escrow_file = dir.join("sctl-escrow.age");
 
-    let cfg = cfg_for(SecretBackend::Tpm, &dir, &keyfile, &escrow_file, &home.home);
+    let cfg = cfg_for(SecretBackend::Tpm, &dir, &escrow_file, &home.home);
 
-    let map = build_map(&cfg, &ConstProvider { pass: PASS }, &[]).unwrap();
+    let map = build_map(
+        &cfg,
+        &ConstKey { key: G },
+        &ConstProvider { pass: PASS },
+        &[],
+    )
+    .unwrap();
     finalize(&cfg, &map).unwrap();
     assert!(
         escrow_file.is_file(),

@@ -27,7 +27,7 @@ enterprise secret-manager (Vault-стиль): авто-разблок на «д�
 
 ## 2. Два режима работы и недопустимость рассинхрона
 
-`secret_backend` (глобально) задаёт МЕХАНИЗМ источника секретов:
+`secret_backend` (глобально, ОБЯЗАТЕЛЬНО) задаёт МЕХАНИЗМ источника секретов:
 
 - **`tpm`** — секреты берутся из TPM-блобов (нуль ввода). Присутствуют И
   escrow-блобы (для восстановления).
@@ -59,8 +59,9 @@ gpg:<home_id>:<fingerprint>   -> P   (passphrase мастер-ключа gpg, pe
 ssh:<abspath_ключа>           -> S   (passphrase ssh-ключа, future, per-key)
 ```
 
-- **G (gocryptfs)** — ОДИН общий ключ на все тома (текущая модель `keyfile`).
-  Не per-volume. Источник = байты существующего `~/.config/sctl/key`.
+- **G (gocryptfs)** — ОДИН общий ключ на все тома. Не per-volume. Источник =
+  gocryptfs-пароль, запрошенный при `sctl install` (или env `CRYPT_PASS` для
+  автоматизации); хранится ТОЛЬКО в бэкенде, plaintext-keyfile на диске нет.
 - **P (gpg)** — единица управления = **конкретный первичный (мастер-)ключ
   по fingerprint** внутри home. В одном home может быть много первичных ключей,
   у каждого — свой passphrase (`gpg --change-passphrase <KEYID>` работает на
@@ -141,7 +142,7 @@ TPM на размер sealed-данных ≈128 байт.)
 [settings]
 default_idle = "15m"
 enc_root = "~/.encrypted"
-secret_backend         = "tpm"        # "tpm" | "escrow" | (не задан = legacy)
+secret_backend         = "tpm"        # ОБЯЗАТЕЛЬНО: "tpm" | "escrow"
 escrow_file            = "~/.config/sctl/sctl-escrow.age"
 master_passphrase_file = "~/.config/sctl/master.pass"   # только авария
 tpm_pcr                = false         # optional hardened PCR 7
@@ -150,7 +151,7 @@ tpm_pcr                = false         # optional hardened PCR 7
 path = ".gnupg"
 gpg = true
 gpg_preset = true       # passphrases этого home управляются через backend (TPM или
-                      # escrow — по secret_backend); без secret_backend — ручной ввод
+                      # escrow — по secret_backend); без gpg_preset — ручной ввод
 
 [secrets.mail]
 path = ".local/share/mail"
@@ -158,26 +159,27 @@ depends = ["gpg"]
 ```
 
 Поля:
-- `secret_backend` — глобальный механизм. Не задан → **legacy**: gocryptfs
-  через plaintext-`keyfile`, gpg — ручной ввод (`.common-seed` больше нет).
+- `secret_backend` — глобальный механизм, ОБЯЗАТЕЛЕН (`tpm` | `escrow`); если не
+  задан — `sctl` завершается с ошибкой конфигурации.
 - `gpg_preset` (per-secret opt-in) — управлять passphrase gpg-ключей этого home
   через backend; механизм (tpm/escrow) выбирается `secret_backend`. Без
-  `secret_backend` (legacy) флаг неактивен — gpg не обрабатывается автоматически.
+  `gpg_preset` этот home не обрабатывается автоматически (gpg спрашивает сам).
 - `escrow_file`, `master_passphrase_file` — пути (expanded_tilde).
-- Удаляемые поля/код: `gpg_passphrase_file`, `extract_secret` в `gpg.rs`,
-  `tpm_gpg` (слит с `gpg_preset`: механизм теперь задаётся `secret_backend`).
+- Удалённые поля/код: `keyfile`, `gpg_passphrase_file`, `extract_secret`,
+  `tpm_gpg` (слит с `gpg_preset`), env `SCTL_KEYFILE`/`SCTL_KEY`. Легаси-режим
+  без `secret_backend` удалён.
 - `tpm_ssh` — будущий per-key opt-in для ssh (аналог `gpg_preset`).
 
 ## 7. Команды
 
-### 7.1 `sctl install [names] [--interactive]`
-Единственный writer. Атомарно: seal в TPM + запись escrow + смена passphrase.
+### 7.1 `sctl install [names]`
+Единственный writer. Атомарно: seal в TPM + запись escrow.
 
 Поведение:
-- **config-driven (по умолчанию, headless-дружественно)**: энроллит все
-  секреты с `gpg_preset` (и gocryptfs G) без интерактива. G берётся из существующего
-  keyfile. gpg — ВСЕ секретные ключи home'а (перечислены ниже) энроллятся.
-- **`--interactive`**: перечисляет доступные ключи и даёт выбрать/мультивыбор.
+- **config-driven (headless-дружественно)**: энроллит все секреты с `gpg_preset`
+  (и gocryptfs G). G берётся из промпта gocryptfs-пароля (с подтверждением) или
+  env `CRYPT_PASS`. gpg — ВСЕ секретные ключи home'а (перечислены ниже) энроллятся
+  (для каждого спрашивается passphrase; пустой ввод = пропустить ключ).
 
 Поток (внутри, для каждого managed-секрета; тома монтируются в порядке deps,
 gpg — первым):
@@ -247,19 +249,18 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
 
 ### 7.4 `sctl mount` (интеграция, без новой команды)
 Существующий поток, но с подменой источника:
-- gocryptfs: если `secret_backend` задан →
-  `pass = secret::resolve_secret("gocryptfs","__shared__")` (для TPM — один
-  unseal DEK + decrypt `map.age`, кэш карты на процесс) → временный `0600`
-  passfile → gocryptfs. Иначе legacy keyfile.
+- gocryptfs: `pass = secret::resolve_secret("gocryptfs","__shared__")` (для TPM —
+  один unseal DEK + decrypt `map.age`, кэш карты на процесс) → временный `0600`
+  passfile → gocryptfs.
   - **Окно миграции:** если бэкенд ещё не заенроллен (`backend_missing`: нет
-    `dek.priv`/`map.age` или escrow-файла) — `mount` откатывается на legacy
-    `keyfile` с предупреждением, чтобы можно было примонтировать gpg-том ДО
-    первого `install`. Реальная ошибка unseal на *заенролленном* бэкенде
-    пробрасывается, отката нет.
-- gpg preset (`gpg.rs`): если `backend` задан && `secret.gpg_preset` → один раз
-  берём всю карту (`resolve_all`), для каждого ключа home'а, который ЕСТЬ в карте,
-  делаем preset через `gpg-preset-passphrase` по всем keygrip'ам (вкл. sub).
-  Ключи, пропущенные при install, отсутствуют в карте → тихо пропускаются.
+    `dek.priv`/`map.age` или escrow-файла) — `mount`/`init` спрашивают
+    gocryptfs-пароль (или env `CRYPT_PASS`) с предупреждением, чтобы можно было
+    примонтировать gpg-том ДО первого `install`. Реальная ошибка unseal на
+    *заенролленном* бэкенде пробрасывается, отката нет.
+- gpg preset (`gpg.rs`): если `secret.gpg_preset` → один раз берём всю карту
+  (`resolve_all`), для каждого ключа home'а, который ЕСТЬ в карте, делаем preset
+  через `gpg-preset-passphrase` по всем keygrip'ам (вкл. sub). Ключи,
+  пропущенные при install, отсутствуют в карте → тихо пропускаются.
 
 ## 8. Модульная структура (новые/изменённые файлы)
 
@@ -285,10 +286,10 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
   - `SecretMap = BTreeMap<String, Zeroizing<Vec<u8>>>`.
 - `src/install.rs` — описанный в §7.1 поток.
 - `src/recovery.rs` — §7.2.
-- `cli.rs` — добавить `Install { names, interactive }`, `Recovery { filter }`;
-  убрать упоминание backup.
-- `config.rs` — поля `secret_backend`, `gpg_preset`, `tpm_ssh` (future),
-  `escrow_file`, `master_passphrase_file`, `tpm_pcr`; убрать `gpg_passphrase_file`.
+- `cli.rs` — `Install { names }`, `Recovery { filter }`.
+- `config.rs` — поля `secret_backend` (обязателен), `gpg_preset`, `tpm_ssh`
+  (future), `escrow_file`, `master_passphrase_file`, `tpm_pcr`; убраны `keyfile`,
+  `gpg_passphrase_file`.
 - `gpg.rs` — удалить `extract_secret` и логику `.common-seed`; `preset` через
   `secret::resolve_secret` при `gpg_preset`.
 - `mount.rs` — gocryptfs-ключ через `secret::resolve_secret`.
@@ -297,7 +298,7 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
 ## 9. Свойства безопасности
 
 - На диске — только ciphertext (TPM-блобы + escrow под мастер-паролем).
-  Plaintext-keyfile из конфиг-дира убирается (реальное улучшение).
+  Plaintext-keyfile из конфиг-дира удалён (реальное улучшение).
 - Украденный диск бесполезен: TPM-блобы не откроются вне чипа, escrow требует
   мастер-пароль.
 - **Смена passphrase ≠ смена ключа**: `gpg --change-passphrase` / `ssh-keygen -p`
@@ -324,13 +325,14 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
 
 ## 11. Открытые решения / допущения (требуют визы)
 
-1. **G = байты существующего keyfile**, подаются gocryptfs как passphrase через
-   временный passfile (adopt, тома НЕ ре-инициализируются). Если нужна генерация
-   свежего ключа + re-init — отдельная future-опция.
+1. **G = gocryptfs-пароль из промпта `install`** (или env `CRYPT_PASS`), подаётся
+   gocryptfs как passphrase через временный passfile (adopt, тома НЕ
+   ре-инициализируются). Если нужна генерация свежего ключа + re-init — отдельная
+   future-опция.
 2. **Escrow plaintext = TOML** (а не bincode) ради читаемости.
 3. **TPM: первичный ключ воссоздаётся каждый раз** (без NV-persistence).
-4. **config-driven install энроллит ВСЕ ключи** home'а с `gpg_preset` (без
-   поштучного выбора); выбор конкретных ключей — только в `--interactive`.
+4. **config-driven install энроллит ВСЕ ключи** home'а с `gpg_preset` (пустой
+   ввод passphrase пропускает конкретный ключ).
 5. **PCR выключен по умолчанию** (`tpm_pcr=false`); включение = привязка к
    secure-boot (PCR 7), ломается при обновлении прошивки.
 6. `sctl install` в режиме `escrow` **устанавливает мастер-пароль** (он нужен
@@ -348,11 +350,10 @@ TPM. Опц. фильтр по префиксу (напр. только `gpg:`).
   зависимость, см. §12). Итоговый выбор фиксируется при реализации шага 4.
   В обоих случаях интерфейс `tpm.rs` (`seal`/`unseal`) остаётся неизменным,
   чтобы `secret.rs`/`install.rs` не зависели от выбора реализации.
-- **Интерактивный выбор ключей — кастомный номерной пикер без зависимостей**
-  (в духе существующего `rpassword`-промпта): печать пронумерованного списка
-  + парсинг multi-select (`1,3-5`). Гейт на `IsTerminal`; без TTY `--interactive`
-  завершается ошибкой. Альтернатива `dialoguer` отклонена (лишняя зависимость
-  ради одного промпта).
+- **Интерактивный выбор ключей — ОТКЛОНЁН/УДАЛЁН (v0.9.0).** Изначально
+  планировался кастомный номерной пикер (`1,3-5`) под `--interactive`, но флаг
+  так и остался no-op и удалён. `install` энроллит все primary-ключи home'а;
+  ненужный ключ пропускается пустым вводом passphrase.
 - **Список gpg-ключей — через `gpg` CLI** (`--list-secret-keys --with-colons
    --with-keygrip`, уже реализовано в `gpg.rs::keygrips`). Чистый Rust-OpenPGP
    (`sequoia`/`pgp`) не годится как первичный источник — он не управляет живым
@@ -449,18 +450,20 @@ primary-контекст (`prim-<hash>.ctx`) вынесен в per-boot tmpfs (v
          выше закрыт). `tss-esapi`-своп — отдельная опциональная задача (§12).
 - [x] **5. `src/secret.rs`** — `resolve_secret(kind,id)` реализован (дубликат-черновик
          выше закрыт).
-- [x] **6. `src/install.rs`** + `cli.rs`(`Install{names,interactive}`) +
-         `main.rs` — единственный writer: `build_map` (G из keyfile + gpg-пассфразы
-         `gpg_preset`-секретов) → `finalize` (seal TPM + атомарная запись escrow).
-         Тесты `finalize_then_recovery_roundtrip_{escrow,tpm}` **проходят** (TPM
-         реально). Алиас `inst` (чтобы не конфликтовать с `init`=`in`).
+- [x] **6. `src/install.rs`** + `cli.rs`(`Install{names}`) +
+         `main.rs` — единственный writer: `build_map` (G из промпта/`CRYPT_PASS`
+         + gpg-пассфразы `gpg_preset`-секретов) → `finalize` (seal TPM + атомарная
+         запись escrow). Тесты `finalize_then_recovery_roundtrip_{escrow,tpm}`
+         **проходят** (TPM реально). Алиас `inst` (чтобы не конфликтовать с
+         `init`=`in`).
 - [x] **7. `src/recovery.rs`** + `cli.rs`(`Recovery{filter}`) — `read_map` +
          печать карты (base64). Тесты выше покрывают round-trip.
 - [x] **8. `gpg.rs`** — удалены `extract_secret`/`.common-seed`/`gpg_passphrase_file`;
-         `preset` через `secret::resolve_secret` при `backend+gpg_preset` (fpr→keygrips
-         рантаймом через `keys_with_keygrips`). Legacy/manual → no-op (ручной ввод).
-- [x] **9. `mount.rs`** — G через `resolve_secret` (+`passfile::from_bytes`);
-         в backend-режиме прямое чтение keyfile не используется для монтирования.
+         `preset` через `secret::resolve_secret` при `gpg_preset` (fpr→keygrips
+         рантаймом через `keys_with_keygrips`). Без `gpg_preset` → no-op (ручной ввод).
+- [x] **9. `mount.rs`** — G через `resolve_secret` (+`passfile::from_bytes`); до
+         первого `install` — промпт gocryptfs-пароля (или `CRYPT_PASS`), keyfile
+         удалён.
 - [x] **10. `check.rs`** — backend-проверки (tpm2-tools/`/dev/tpmrm0`/`tss`;
          escrow self-test) + **desync-детектор** (unseal TPM vs decrypt escrow).
 - [x] **11. Тесты (фикстура)** — `tests/common/mod.rs` (N gpg-мастеров с
@@ -491,10 +494,10 @@ primary-контекст (`prim-<hash>.ctx`) вынесен в per-boot tmpfs (v
   writer — `build_map` → `finalize` (seal TPM + атомарный escrow). Юнит-тесты
   round-trip зелёные, TPM-тест реально ходит в чип.
 - **Шаг 8:** `gpg.rs::preset` через `secret::resolve_secret` при
-  `backend+gpg_preset` (fpr→keygrips через `keys_with_keygrips`); `.common-seed`/
+  `gpg_preset` (fpr→keygrips через `keys_with_keygrips`); `.common-seed`/
   `extract_secret`/`gpg_passphrase_file` удалены.
 - **Шаг 9:** `mount.rs` берёт `G` из `resolve_secret` (+`passfile::from_bytes`);
-  legacy-режим — через `keyfile`.
+  до первого `install` — промпт gocryptfs-пароля (или `CRYPT_PASS`).
 - **Шаг 10:** `check.rs` — backend-проверки (tpm2-tools/`/dev/tpmrm0`/`tss`;
   per-secret TPM-блобы; escrow self-test) + **desync-детектор** (симметричный,
   TPM→escrow: ловит расхождение значений И TPM-блобы без эскроу-контрчасти).
@@ -524,57 +527,58 @@ primary-контекст (`prim-<hash>.ctx`) вынесен в per-boot tmpfs (v
 ### Отложено (документировано, не блокирует)
 - **§11.2 Ротация gpg passphrase** — gpg 2.5.20 не меняет passphrase на *другой*
   неинтерактивно; `install` хранит существующий пароль (пресет работает).
-- **§11.4 Интерактивный номерной пикер** — `InstallOpts.interactive` пока не
-  задействован; config-driven энроллит все ключи home'а (решение №4).
 - **`tss-esapi`** — выбран fallback `tpm2-tools` (§11.1); своп — опционально.
 - **PCR-политика** — `tpm_pcr=true` блокируется явной ошибкой (§5), не реализовано.
 - **SSH (`tpm_ssh`)** — future, отдельный opt-in; дизайн и нюансы реализации в §16.
 
 ## 15. Первый запуск (`install`) на уже настроенной машине
 
-Случай: конфиг и тома уже есть, gocryptfs-`filekey` существует. Цель — завести
+Случай: конфиг и тома уже есть, gocryptfs-пароль известен. Цель — завести
 бэкенд, не сломав существующие тома.
 
-**Главное:** `install` **НЕ регенерирует** `filekey` — он забирает его байты как
-общий `G`. Существующие тома (инициализированные этим `filekey`) продолжают
-открываться. Регенерация сломала бы их.
+**Главное:** `install` **НЕ регенерирует** ключ томов — он забирает введённый
+gocryptfs-пароль как общий `G`. Введи ТОТ ЖЕ пароль, которым уже зашифрованы
+тома; регенерация/опечатка сломала бы их (подтверждение пароля в промпте это
+страхует).
 
 > Порядок (важно: gpg-хом — это **тоже** зашифрованный том, он должен быть
-> примонтирован ДО `install`, иначе enrolment gpg-пароля не найдёт home):
+> примонтирован ДО `install`, иначе enrolment gpg-пароля не найдёт home). Т.к.
+> `secret_backend` обязателен, до первого `install` `mount`/`init` спрашивают
+> gocryptfs-пароль (или берут `CRYPT_PASS`):
 
 ```sh
-# 0. примонтируй gpg-том, чтобы ~/.gnupg появился.
-#    Если в конфиге уже стоит secret_backend — временно закомментируй его,
-#    примонтируй, потом верни и продолжи.
+# 0. примонтируй gpg-том, чтобы ~/.gnupg появился. Бэкенд ещё пуст → sctl
+#    спросит gocryptfs-пароль (тот же, которым зашифрованы тома).
 sctl mount gpg
 
 # 1. мастер-пароль сессии install — шифрует escrow.
-#    Это НОВЫЙ пароль восстановления (не filekey, не gpg-пароль).
+#    Это НОВЫЙ пароль восстановления (не gocryptfs-пароль, не gpg-пароль).
 export SCTL_MASTER_PASS='...надёжный пароль восстановления...'
 
-# 2. enrolment: keyfile -> G (seal в TPM); для каждого gpg_preset-ключа —
-#    запрос СУЩЕСТВУЮЩЕГО gpg-пароля (сохраняется как есть, НЕ меняется).
+# 2. enrolment: промпт gocryptfs-пароля -> G (seal в TPM); для каждого
+#    gpg_preset-ключа — запрос СУЩЕСТВУЮЩЕГО gpg-пароля (сохраняется как есть).
 sctl install
 #    опц. --names gpg|main|... — заенроллить подмножество секретов.
 
 # 3. проверка (check не блокируется на вводе мастер-пароля).
 sctl check
-sctl recovery          # base64 gocryptfs:__shared__ — сверь с ~/key
+sctl recovery          # base64 gocryptfs:__shared__ — сверь при необходимости
 
 # 4. переключаемся на backend-монтирование (gpg-пароль пресетится из TPM).
 sctl umount gpg && sctl mount gpg
 
-# 5. (опц.) харденинг: удали plaintext ~/key (после проверки!), положи
-#    master_passphrase_file (0600). Откат в любой момент — убрать secret_backend.
+# 5. (опц.) харденинг: положи master_passphrase_file (0600) для аварийного
+#    восстановления.
 ```
 
 **Что явно НЕ делается и почему:**
-- `filekey` не регенерируется (иначе старые тома не откроются).
+- ключ томов не регенерируется (иначе старые тома не откроются) — `install`
+  берёт введённый пароль как `G`.
 - gpg-пароль **не ротируется** на случайный (§11.2: gpg 2.5.x не меняет пароль
   неинтерактивно); хранится текущий — пресет работает.
 - выбор ключей: `install` проходит по всем primary-ключам gpg-home'а и на каждом
   спрашивает пароль; **пустой Enter пропускает** ключ (v0.8.5, §7.1). Номерной
-  пикер (`--interactive`) по-прежнему отложен (§11.4).
+  пикер (`--interactive`) удалён (v0.9.0, §11.4).
 - **SSH**: секрет `ssh` здесь — это gocryptfs-том `~/.ssh`; пароли ssh-ключей
   внутри **не** энроллятся (реализованы только gocryptfs + gpg). SSH-энроллмент —
   future (§16).
@@ -699,9 +703,10 @@ resolve_all(cfg):
 ### 17.7 Окно миграции (первый `install`)
 
 Пока бэкенд не заенроллен (`backend_missing`: нет `dek.priv`/`map.age` или
-escrow-файла), `mount` откатывается на legacy `keyfile` с предупреждением — чтобы
-можно было примонтировать gpg-том до первого `install`. На заенролленном бэкенде
-реальная ошибка unseal пробрасывается (отката нет).
+escrow-файла), `mount`/`init` спрашивают gocryptfs-пароль (или берут env
+`CRYPT_PASS`) с предупреждением — чтобы можно было примонтировать gpg-том до
+первого `install`. На заенролленном бэкенде реальная ошибка unseal
+пробрасывается (отката нет).
 
 ### 17.8 API (актуальный)
 
@@ -711,8 +716,9 @@ escrow-файла), `mount` откатывается на legacy `keyfile` с п
   `<tmp>/sctl-<uid>`), `primary_ctx_file()` (namespaced по hash(state_dir)).
 - `secret.rs`: `resolve_all`, `resolve_secret`, `backend_missing` (кэш `MAP_CACHE`
   по пути файла — изолирует бэкенды и параллельные тесты).
-- `install.rs`: `build_map` (skip через `Option` от `GpgPassProvider`) →
-  `finalize` (escrow + при TPM: `seal_dek` + `map.age`), `write_atomic` (0600).
+- `install.rs`: `build_map` (G через `GocryptfsKeyProvider`; gpg-skip через
+  `Option` от `GpgPassProvider`) → `finalize` (escrow + при TPM: `seal_dek` +
+  `map.age`), `write_atomic` (0600).
 - `check.rs`: presence (`dek_exists`+`map.age`+права) + desync (сравнение двух
   полных карт).
 
@@ -722,3 +728,12 @@ escrow-файла), `mount` откатывается на legacy `keyfile` с п
 - `gpg_skip_keys` (конфиг), `is_skipped`, `list_primary_keys`, `enrolled_ids`.
 - `tpm_gpg` (слит в `gpg_preset`; ещё раньше).
 - Зависимость `sha2` (была нужна для непрозрачных per-key имён — больше нет).
+
+### 17.10 Что удалено в v0.9.0
+
+- Plaintext-`keyfile` (поле конфига, env `SCTL_KEYFILE`/`SCTL_KEY`, чтение с
+  диска). `G` теперь приходит из промпта `install` (или env `CRYPT_PASS`) и
+  живёт только в бэкенде.
+- Легаси-режим без `secret_backend`: `secret_backend` стал обязательным
+  (`tpm`|`escrow`); `Config.secret_backend` больше не `Option`.
+- Флаг `sctl install --interactive` (был no-op) и `InstallOpts.interactive`.

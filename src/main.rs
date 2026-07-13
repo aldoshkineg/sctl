@@ -53,7 +53,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 sctl::watch::one_pass(&cfg)?;
             } else {
                 // Singleton: only one resident watcher may run at a time.
-                match sctl::lock::acquire(&cfg.state_dir, "watch", "watch") {
+                match sctl::lock::acquire(&cfg.runtime_dir(), "watch", "watch") {
                     Ok(_lock) => sctl::watch::run(&cfg)?,
                     Err(_) => { /* another watcher already running */ }
                 }
@@ -64,9 +64,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let cfg = Config::load()?;
             Ok(exit(sctl::check::run(&cfg)))
         }
-        Command::Install { names, interactive } => {
+        Command::Install { names } => {
             let cfg = Config::load()?;
-            sctl::install::run(&cfg, &sctl::install::InstallOpts { names, interactive })?;
+            sctl::install::run(&cfg, &sctl::install::InstallOpts { names })?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Recovery { filter } => {

@@ -85,9 +85,6 @@ pub enum Command {
         /// Restrict to these secret names (default: all managed secrets)
         #[arg(required = false)]
         names: Vec<String>,
-        /// Interactive mode (prompts for existing gpg key passphrases)
-        #[arg(long)]
-        interactive: bool,
     },
     /// Recover the secret map from the escrow container
     #[command(visible_alias = "rc")]

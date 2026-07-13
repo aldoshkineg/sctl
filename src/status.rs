@@ -28,9 +28,9 @@ pub fn run(cfg: &Config, do_notify: bool) {
         let mounted = is_mounted(&mnt);
         let safe = secret.safe();
         if !mounted {
-            state::clear(&cfg.state_dir, &safe);
+            state::clear(&cfg.runtime_dir(), &safe);
         }
-        let cd = state::countdown(&cfg.state_dir, &safe, mounted);
+        let cd = state::countdown(&cfg.runtime_dir(), &safe, mounted);
 
         let state_cell = if mounted {
             Cell::styled("mounted", red)

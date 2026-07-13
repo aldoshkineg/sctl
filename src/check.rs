@@ -50,9 +50,6 @@ pub fn run(cfg: &Config) -> bool {
         );
     }
 
-    // keyfile (only meaningful in legacy mode)
-    check_keyfile(&cfg.keyfile, &mut report);
-
     // Backend-specific checks + desync detection.
     check_backend(cfg, &mut report);
 
@@ -139,16 +136,12 @@ pub fn run(cfg: &Config) -> bool {
 /// Backend presence + self-tests. Also runs the desync detector (§7.3).
 fn check_backend(cfg: &Config, report: &mut dyn FnMut(Level, String)) {
     match cfg.secret_backend {
-        None => report(
-            Level::Warn,
-            "secret_backend not set: legacy mode (plaintext keyfile, manual gpg)".to_string(),
-        ),
-        Some(SecretBackend::Tpm) => check_tpm(cfg, report),
-        Some(SecretBackend::Escrow) => check_escrow(cfg, report),
+        SecretBackend::Tpm => check_tpm(cfg, report),
+        SecretBackend::Escrow => check_escrow(cfg, report),
     }
 }
 
-/// TPM backend: tools, device, group, and per-secret blob presence.
+/// TPM backend: tools, device, group, and sealed DEK + DEK-encrypted map.
 fn check_tpm(cfg: &Config, report: &mut dyn FnMut(Level, String)) {
     // tpm2-tools presence.
     if Command::new("tpm2_createprimary")
@@ -409,18 +402,6 @@ fn user_in_group(group: &str) -> bool {
     groups
         .map(|g| g.split_whitespace().any(|x| x.parse::<u32>() == Ok(gid)))
         .unwrap_or(false)
-}
-
-fn check_keyfile(keyfile: &Path, report: &mut dyn FnMut(Level, String)) {
-    if !keyfile.exists() {
-        report(
-            Level::Warn,
-            format!("keyfile absent (will prompt): {}", keyfile.display()),
-        );
-        return;
-    }
-    report(Level::Ok, format!("keyfile present: {}", keyfile.display()));
-    check_mode(keyfile, 0o177, "keyfile", report);
 }
 
 /// Warn if any bit in `mask` is set on the path's mode.

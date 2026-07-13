@@ -1304,12 +1304,13 @@ dependencies = [
 
 [[package]]
 name = "sctl"
-version = "0.8.6"
+version = "0.9.3"
 dependencies = [
  "age",
  "anyhow",
  "assert_cmd",
  "base64 0.22.1",
+ "bech32",
  "clap",
  "clap_complete",
  "nix",
