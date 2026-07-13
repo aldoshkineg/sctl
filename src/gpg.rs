@@ -7,9 +7,7 @@
 //!
 //! In backend mode the passphrases come from the secret backend via
 //! `secret::resolve_secret` for each secret that opts in with `gpg_preset`;
-//! secrets without `gpg_preset` are left for gpg to prompt interactively. The
-//! historical `.common-seed` seed-file mechanism has been removed (see
-//! docs/SECRETS.md §6/§8).
+//! secrets without `gpg_preset` are left for gpg to prompt interactively.
 
 use crate::config::{Config, Secret};
 use crate::procfs;

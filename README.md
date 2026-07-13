@@ -78,14 +78,22 @@ gpg_preset = true                            # manage this home's keys via the b
 ### `sctl install` — the single writer
 
 Enrolls every managed secret into the backend in one atomic, in-memory pass:
-prompts for the shared gocryptfs password `G` (or reads `CRYPT_PASS`), collects
-each `gpg_preset` gpg home's key passphrase, seals every entry into the TPM (tpm
-backend) **and** writes the age/scrypt escrow blob atomically. Run it once on
-each machine:
+prompts for the shared gocryptfs password `G` (or reads `CRYPT_PASS`), then asks
+once **`Use encryption for gpg keys? [y/N]`**. Answering `y` collects each
+`gpg_preset` gpg home's key passphrase and seals every entry into the TPM (tpm
+backend) **and** writes the age/scrypt escrow blob atomically. Answering `n`
+enrolls only `G` — any previously enrolled gpg keys are dropped from the live
+backend (see backup below). Run it once on each machine:
 
 ```sh
 SCTL_MASTER_PASS=... sctl install
 ```
+
+`install` rewrites the **entire** backend every time (a fresh DEK, a fresh map,
+a fresh escrow blob). Before overwriting, if a previous `tpm`/`escrow`
+configuration exists, it is copied verbatim to a timestamped directory under
+`$TMPDIR` (`sctl-backup-<pid>-<nanos>`) and an informational line is printed, so
+the prior configuration can always be recovered by hand.
 
 ### `sctl recovery`
 
@@ -104,7 +112,93 @@ Validates the backend: for `tpm` it checks `tpm2-tools`, `/dev/tpmrm0`, the
 `tss` group, and per-secret TPM blobs; for `escrow` it checks the file and runs
 a decrypt self-test. It also runs the **desync detector** — if both TPM blobs
 and the escrow blob exist, it unseals both and compares them, failing loudly if
-they disagree (re-run `sctl install` to resync).
+they agree (re-run `sctl install` to rewrite both from the single in-memory
+map if they ever differ).
+
+### How it works (DEK model)
+
+`sctl` keeps one in-memory **secret map** — `gocryptfs:__shared__` → `G` plus
+`gpg:<home>:<fpr>` → passphrase for each enrolled key. That single map is
+serialized once (TOML, base64 secrets) and wrapped two ways:
+
+| File | Wrapper | Purpose |
+|------|---------|---------|
+| `escrow_file` (`sctl-escrow.age`) | master passphrase (age/scrypt) | recovery, portable to any machine |
+| `state_dir/tpm/map.age` | **DEK** (age X25519, "password" = base64(DEK)) | daily fast path on this machine |
+| `state_dir/tpm/dek.priv`+`dek.pub` | sealed in TPM | holds the DEK (32 random bytes) |
+| `$XDG_RUNTIME_DIR/sctl/prim-<hash>.ctx` | — (non-secret, per-boot tmpfs) | cached primary-key context |
+
+A TPM can only seal ≈128 bytes, so the whole map (larger) is encrypted with a
+random **DEK** that is what actually gets sealed. On mount, `sctl` does **one**
+`tpm2_unseal` to get the DEK, then decrypts the whole `map.age` into a
+process-local `Zeroizing` cache — every subsequent `resolve_secret` hits the
+cache. The primary-key context is created once (`tpm2_createprimary`, ~2s) and
+cached in tmpfs; later mounts only `load`+`unseal` (~1s). The escrow file is the
+identical container, merely wrapped with the master passphrase instead of the
+DEK.
+
+All secret bytes in memory are `Zeroizing` (zeroized on drop).
+
+### First run / migrating an existing machine
+
+Your volumes already exist and their gocryptfs password is known — the goal is
+to bring up the backend **without** re-keying the volumes.
+
+> The gpg home is itself an encrypted volume and must be mounted *before*
+> `install`, otherwise enrolment can't find the keys. Because `secret_backend`
+> is required, `mount`/`init` prompt for the gocryptfs password (or read
+> `CRYPT_PASS`) until the first `install` populates the backend.
+
+```sh
+# 0. mount the gpg volume so ~/.gnupg appears. Backend is empty -> sctl asks
+#    for the gocryptfs password (the one that already encrypts your volumes).
+sctl mount gpg
+
+# 1. master passphrase for this install session (encrypts the escrow blob).
+#    This is a NEW recovery password, not the gocryptfs/gpg password.
+export SCTL_MASTER_PASS='...recovery password...'
+
+# 2. enroll: prompt for the gocryptfs password -> G (sealed into TPM); for each
+#    gpg_preset key, enter its CURRENT passphrase (kept as-is, see below).
+sctl install
+
+# 3. verify.
+sctl check
+sctl recovery          # base64 gocryptfs:__shared__ — compare if needed
+
+# 4. switch to backend mounting (gpg passphrase is now preset from TPM).
+sctl umount gpg && sctl mount gpg
+
+# 5. (optional) harden: drop a master_passphrase_file (0600) for emergency recovery.
+```
+
+`install` does **not** regenerate the volume key — it adopts the password you
+type as `G`. If you ever kept a plaintext key (older builds), remove it after
+enrolment: `rm ~/.config/sctl/key` and drop any `keyfile = …` line from
+`config.toml`.
+
+### Security properties
+
+- Only ciphertext on disk: TPM blobs + the escrow blob under the master
+  passphrase. No plaintext keyfile in the config dir.
+- A stolen disk is useless: TPM blobs won't open off the chip, escrow needs the
+  master passphrase.
+- Changing a passphrase ≠ changing the key: `gpg`/`ssh` keys keep their
+  fingerprint/keygrip; `sctl` only caches the existing passphrase.
+- `install` is the single writer: both backends are derived from one in-memory
+  map and written atomically (tmp + rename, `0600`), so the TPM and escrow
+  views cannot diverge through normal operation.
+
+### Known limitations
+
+- **gpg passphrase is not rotated.** gpg 2.5.x won't apply a *different*
+  passphrase non-interactively, so `install` stores the existing passphrase and
+  presets it; keys are still auto-unlocked, just not randomized.
+- **PCR binding is not implemented.** `tpm_pcr = true` is rejected; seals are
+  not bound to secure-boot PCRs.
+- **SSH key passphrases are not yet managed.** Only gocryptfs + gpg are enrolled;
+  standalone ssh keys (future `tpm_ssh`) are not. A `ssh` secret here is just a
+  gocryptfs volume (`~/.ssh`); the key passphrases inside are untouched.
 
 ## Usage
 
@@ -147,7 +241,10 @@ When a mount is busy on `umount`:
    silently (SIGTERM, then SIGKILL), then unmounted.
 2. If **any other** process holds it → nothing is killed; the processes are
    listed and `--force` is required.
-3. `--force` kills all holders regardless. `--lazy` detaches immediately.
+3. `--force` kills all holders regardless. It also bypasses the dependency
+   guard: a requested secret is unmounted even if other mounted secrets still
+   depend on it (those dependents are left mounted, now broken). `--lazy`
+   detaches immediately.
 
 ### Busy watcher (`kill_busy`)
 

@@ -227,14 +227,29 @@ fn do_umount(
 ) -> Result<bool> {
     let plan = sctl::deps::umount_plan(cfg, requested, mounted)?;
     let mut failed = false;
+    // With `--force`, a requested secret whose mounted dependents are not being
+    // unmounted is unmounted anyway (the dependents are left mounted, broken).
+    let mut to_unmount: Vec<String> = plan.order.clone();
     for (blocked, blockers) in &plan.blocked {
-        eprintln!(
-            "error: {blocked} is required by mounted: {} (unmount them first or include them)",
-            blockers.join(", ")
-        );
-        failed = true;
+        if opts.force {
+            eprintln!(
+                "warning: {} is required by mounted: {} (--force: unmounting only {})",
+                blocked,
+                blockers.join(", "),
+                blocked
+            );
+            if !to_unmount.contains(blocked) {
+                to_unmount.push(blocked.clone());
+            }
+        } else {
+            eprintln!(
+                "error: {blocked} is required by mounted: {} (unmount them first or include them)",
+                blockers.join(", ")
+            );
+            failed = true;
+        }
     }
-    for name in plan.order {
+    for name in to_unmount {
         let secret = cfg.get(&name)?.clone();
         if let Err(e) = sctl::umount::umount_one(cfg, &secret, opts) {
             eprintln!("error: {e:#}");

@@ -1,16 +1,16 @@
 [package]
 name = "sctl"
-version = "0.9.3"
+version = "0.9.5"
 edition = "2024"
 rust-version = "1.89"
-description = "Config-driven gocryptfs secret mount manager with dependencies, idle auto-unmount, and desktop notifications."
+description = "Config-driven gocryptfs secret mount manager with dependencies, idle auto-unmount, and desktop notifications hooks."
 authors = ["Eugene Aldoshkin <aldoshkineg@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aldoshkineg/sctl"
 readme = "README.md"
 keywords = ["gocryptfs", "encryption", "mount", "fuse", "cli"]
 categories = ["command-line-utilities", "filesystem"]
-exclude = ["/.github", "/legacy"]
+exclude = ["/.github"]
 
 [dependencies]
 age = "0.11.3"

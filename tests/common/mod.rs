@@ -1,7 +1,7 @@
 //! Shared GnuPG test fixture: an isolated GNUPGHOME with several master keys
 //! (each carrying `sign` + `auth`/ssh subkeys).
 //!
-//! Shells out to the system `gpg` binary (per docs/SECRETS.md §12). The
+//! Shells out to the system `gpg` binary. The
 //! helpers are gated behind [`have_gpg`]; when `gpg` is missing the calling
 //! test skips instead of failing.
 

@@ -2,14 +2,16 @@
 //!
 //! This is the single writer. It:
 //!   1. prompts for the shared gocryptfs password `G` (or reads `CRYPT_PASS`),
-//!   2. collects each `gpg_preset` gpg home's primary-key passphrase,
+//!   2. asks once whether to enroll gpg key passphrases (`gpg_preset` homes);
+//!      if declined, only `G` is written and any prior gpg entries are dropped
+//!      (the pre-install backup, see `finalize`, keeps the old configuration),
 //!   3. seals every entry into the chosen backend:
 //!      - `tpm`: a random DEK into the TPM, the map wrapped by the DEK (X25519,
 //!        no scrypt); no master passphrase required,
 //!      - `escrow`: the map wrapped by the master passphrase (scrypt) into the
 //!        escrow file.
 //!
-//! NOTE on gpg passphrase rotation (docs/SECRETS.md §11.6): gpg 2.5.x cannot
+//! NOTE on gpg passphrase rotation: gpg 2.5.x cannot
 //! non-interactively change a key's passphrase to a *different* value via the
 //! loopback pinentry (it reuses the same passphrase for the old and new
 //! prompts), and offers no `--quick-passwd`. Until that is solved (e.g. a custom
@@ -24,8 +26,10 @@ use crate::secret;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
 use rand::{Rng, rng};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 /// Options for the install command.
@@ -110,6 +114,36 @@ impl GpgPassProvider for ConstProvider<'_> {
     }
 }
 
+/// Source of a yes/no confirmation. Abstracted so tests can supply a known
+/// answer without an interactive prompt.
+pub trait ConfirmProvider {
+    fn confirm(&self, prompt: &str) -> Result<bool>;
+}
+
+/// Real provider: read a line from the terminal; `y`/`yes` (any case) = yes.
+pub struct PromptConfirm;
+
+impl ConfirmProvider for PromptConfirm {
+    fn confirm(&self, prompt: &str) -> Result<bool> {
+        eprint!("{prompt}");
+        let mut buf = String::new();
+        io::stdin()
+            .read_line(&mut buf)
+            .context("reading confirmation")?;
+        let s = buf.trim().to_ascii_lowercase();
+        Ok(matches!(s.as_str(), "y" | "yes"))
+    }
+}
+
+/// Known-value provider for tests.
+pub struct ConstConfirm(pub bool);
+
+impl ConfirmProvider for ConstConfirm {
+    fn confirm(&self, _prompt: &str) -> Result<bool> {
+        Ok(self.0)
+    }
+}
+
 /// Source of the shared gocryptfs password `G`. Abstracted so tests can supply a
 /// known value without an interactive prompt.
 pub trait GocryptfsKeyProvider {
@@ -143,10 +177,14 @@ impl GocryptfsKeyProvider for ConstKey<'_> {
 /// Build the secret map to enroll.
 ///
 /// `names` restricts which `gpg_preset` gpg homes are enrolled (empty = all). The
-/// shared gocryptfs key is always enrolled (from `g_provider`).
+/// shared gocryptfs key is always enrolled (from `g_provider`). For gpg keys,
+/// `confirm` is asked once whether to enroll them: if declined, the gpg homes
+/// are skipped and only `G` is written (the previous gpg entries, if any, stay
+/// only in the pre-install backup made by `finalize`).
 pub fn build_map(
     cfg: &Config,
     g_provider: &dyn GocryptfsKeyProvider,
+    confirm: &dyn ConfirmProvider,
     provider: &dyn GpgPassProvider,
     names: &[String],
 ) -> Result<escrow::SecretMap> {
@@ -159,11 +197,25 @@ pub fn build_map(
     }
     map.insert(secret::composite_key("gocryptfs", "__shared__"), g);
 
+    // Ask once whether to enroll gpg key passphrases into the backend.
+    let enrolls_gpg = cfg
+        .secrets
+        .values()
+        .any(|s| s.gpg_preset && (names.is_empty() || names.contains(&s.name)));
+    let use_gpg_enc = if enrolls_gpg {
+        confirm.confirm("Use encryption for gpg keys? [y/N] ")?
+    } else {
+        false
+    };
+
     for secret in cfg.secrets.values() {
         if !secret.gpg_preset {
             continue;
         }
         if !names.is_empty() && !names.contains(&secret.name) {
+            continue;
+        }
+        if !use_gpg_enc {
             continue;
         }
         let home = secret.mountpoint(&cfg.home);
@@ -205,8 +257,12 @@ pub fn build_map(
 ///   `escrow_file`.
 ///
 /// All files are written atomically (tmp + rename) with `0600` perms. `finalize`
-/// is the sole writer (see docs §6).
+/// is the sole writer.
 pub fn finalize(cfg: &Config, map: &escrow::SecretMap) -> Result<()> {
+    // `install` always rewrites the whole backend, so back up any existing
+    // configuration first — this is the only safety net against an accidental
+    // re-enroll (e.g. answering "no" to gpg encryption drops the old gpg keys).
+    backup_existing(cfg)?;
     match cfg.secret_backend {
         SecretBackend::Tpm => {
             let mut dek = Zeroizing::new(vec![0u8; 32]);
@@ -243,6 +299,51 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Before overwriting, copy any existing backend files (TPM sealed DEK + map,
+/// escrow blob) into a timestamped temp dir so the previous configuration can be
+/// recovered. `install` always rewrites the whole backend, so this is the only
+/// safety net if a re-enroll drops entries (e.g. declining gpg encryption).
+fn backup_existing(cfg: &Config) -> Result<()> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for f in [
+        cfg.tpm_dir().join("dek.priv"),
+        cfg.tpm_dir().join("dek.pub"),
+        cfg.tpm_map_file(),
+    ] {
+        if f.exists() {
+            files.push(f);
+        }
+    }
+    if cfg.escrow_file.exists() {
+        files.push(cfg.escrow_file.clone());
+    }
+    if files.is_empty() {
+        return Ok(());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let backup = std::env::temp_dir().join(format!(
+        "sctl-backup-{}-{}",
+        std::process::id(),
+        now.as_nanos()
+    ));
+    std::fs::create_dir_all(&backup)
+        .with_context(|| format!("creating backup dir {}", backup.display()))?;
+    for f in &files {
+        let Some(name) = f.file_name() else {
+            continue;
+        };
+        let dest = backup.join(name);
+        std::fs::copy(f, &dest).with_context(|| format!("backing up {}", f.display()))?;
+    }
+    eprintln!(
+        "existing tpm/escrow configuration found; backed up to {}",
+        backup.display()
+    );
+    Ok(())
+}
+
 /// CLI entry: enroll the configured secrets.
 pub fn run(cfg: &Config, opts: &InstallOpts) -> Result<()> {
     if !opts.names.is_empty() {
@@ -250,7 +351,13 @@ pub fn run(cfg: &Config, opts: &InstallOpts) -> Result<()> {
             cfg.get(n)?;
         }
     }
-    let map = build_map(cfg, &PromptKey, &PromptProvider, &opts.names)?;
+    let map = build_map(
+        cfg,
+        &PromptKey,
+        &PromptConfirm,
+        &PromptProvider,
+        &opts.names,
+    )?;
     finalize(cfg, &map)?;
     eprintln!("installed {} secret(s) into the backend", map.len());
     Ok(())

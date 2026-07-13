@@ -38,7 +38,7 @@ fn store_map(path: PathBuf, map: SecretMap) -> SecretMap {
 
 /// Composite map/TPM key for a `(kind, id)` pair: `{kind}:{id}`. This is the
 /// single source of truth for key composition so `install`, `gpg` and `check`
-/// can never drift (see docs/SECRETS.md §2 key namespace).
+/// can never drift (the key namespace is defined here and reused everywhere).
 pub fn composite_key(kind: &str, id: &str) -> String {
     format!("{kind}:{id}")
 }

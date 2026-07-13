@@ -24,6 +24,10 @@ impl Sandbox {
         let p = dir.path();
         fs::create_dir_all(p.join("cfg/state")).unwrap();
         fs::create_dir_all(p.join("enc")).unwrap();
+        // Isolate the runtime dir (locks, prim.ctx, stray) per sandbox so
+        // parallel/sequential tests don't share a lock file with a lingering
+        // mount daemon from another sandbox.
+        fs::create_dir_all(p.join("runtime")).unwrap();
         let cfg = config.replace("$ENC", p.join("enc").to_str().unwrap());
         fs::write(p.join("cfg/config.toml"), cfg).unwrap();
         Sandbox { dir }
@@ -40,6 +44,7 @@ impl Sandbox {
             .env("SCTL_CONFIG", p.join("cfg/config.toml"))
             .env("SCTL_CONFIG_DIR", p.join("cfg"))
             .env("SCTL_STATE_DIR", p.join("cfg/state"))
+            .env("XDG_RUNTIME_DIR", p.join("runtime"))
             .env("SCTL_COLOR", "never")
             // Non-interactive gocryptfs password (pre-install fallback) and
             // master passphrase for the escrow backend.
@@ -242,6 +247,14 @@ fn mount_pulls_dependencies_and_cascades() {
         .failure()
         .stderr(predicates::str::contains("required by mounted"));
     assert!(is_mounted(&sb.mnt(".gnupg")));
+
+    // --force bypasses the dependency guard: gpg is unmounted, mail stays up.
+    sb.cmd()
+        .args(["umount", "gpg", "--force"])
+        .assert()
+        .success();
+    assert!(!is_mounted(&sb.mnt(".gnupg")));
+    assert!(is_mounted(&sb.mnt(".local/share/mail")));
 
     // Smart cascade: umount mail also unmounts pass + gpg.
     sb.cmd().args(["umount", "mail"]).assert().success();

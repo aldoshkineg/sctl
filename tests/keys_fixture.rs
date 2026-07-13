@@ -1,7 +1,6 @@
 //! Key-generation fixtures: several GnuPG master keys with sign + ssh (auth)
 //! subkeys (via the shared `common` module), and a set of SSH keys in multiple
-//! formats generated locally below. See docs/SECRETS.md (the user-requested
-//! test scenario).
+//! formats generated locally below.
 
 mod common;
 

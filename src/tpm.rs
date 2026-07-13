@@ -1,5 +1,4 @@
-//! TPM seal/unseal via the system `tpm2-tools` package (dependency, see
-//! docs/SECRETS.md §12).
+//! TPM seal/unseal via the system `tpm2-tools` package (a runtime dependency).
 //!
 //! The interface is intentionally narrow (`seal_dek`/`unseal_dek`) so the
 //! underlying implementation can later be swapped for the `tss-esapi` Rust
@@ -285,8 +284,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(tpm_dir(&cfg.state_dir));
         let dek = b"0123456789abcdef0123456789abcdef";
         seal_dek(dek, &cfg).expect("seal_dek");
-        // Fresh cache: clear any prior process state is unnecessary (per-key),
-        // read straight back from the TPM.
+        // Fresh cache: no prior process state to clear, read straight back from
         let got = unseal_dek(&cfg).expect("unseal_dek");
         assert_eq!(got.as_slice(), dek);
     }

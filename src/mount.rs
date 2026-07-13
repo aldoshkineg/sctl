@@ -45,7 +45,6 @@ pub fn init_one(cfg: &Config, secret: &Secret) -> Result<()> {
         bail!("{} already initialized at {}", secret.name, enc.display());
     }
     std::fs::create_dir_all(&enc)?;
-    let _lock = crate::lock::acquire(&cfg.runtime_dir(), &secret.safe(), &secret.name)?;
     std::fs::create_dir_all(&mnt)?;
 
     let pf = resolve_gocryptfs_passfile(cfg, secret, true)?;
