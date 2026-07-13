@@ -10,8 +10,6 @@ design TODOs (`TODO_legacy.md`, `TODO_watch_tpm.md`) are closed.
   way gpg works today. Blocked on `ssh-add` having no stdin/arg passphrase API —
   needs an `SSH_ASKPASS` wrapper or `sshpass`. gocryptfs + gpg are the only
   enrolled kinds for now.
-- **PCR binding.** `tpm_pcr = true` currently `bail!`. Bind the TPM seal to
-  secure-boot PCR 7 (breaks on firmware updates).
 
 ## Possible improvements
 
@@ -19,12 +17,11 @@ design TODOs (`TODO_legacy.md`, `TODO_watch_tpm.md`) are closed.
   different passphrase non-interactively (`--change-passphrase` reuses the same
   value under loopback pinentry), so `install` stores the existing passphrase. A
   custom `pinentry` wrapper (returns distinct old/new) would enable randomization.
-- **Replace `tpm2-tools` shell-out with the `tss-esapi` Rust crate** (links the
-  system `tpm2-tss`, already installed). Fallback CLI works; swap is optional.
-- **Automate live-machine migration.** Today the first-run/`install` flow is
-  manual (mount gpg → install → umount/remount → `rm` old plaintext key). Could
-  be a guided `sctl install --migrate` step.
 
-## Housekeeping
+## Low priority
 
-- Regenerate shell completions after any CLI change.
+- **Replace `tpm2-tools` shell-out with the `tss-esapi` Rust crate.** Links the
+  system `tpm2-tss` (already installed). Benefit is modest (self-contained binary,
+  typed errors) vs. real cost (C build dep, breaks musl-static, lockout risk on
+  existing enrollment, untestable in CI). Current fallback CLI works; swap is
+  optional and not worth the risk for now.
