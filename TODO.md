@@ -25,3 +25,14 @@ design TODOs (`TODO_legacy.md`, `TODO_watch_tpm.md`) are closed.
   typed errors) vs. real cost (C build dep, breaks musl-static, lockout risk on
   existing enrollment, untestable in CI). Current fallback CLI works; swap is
   optional and not worth the risk for now.
+
+## Testing
+
+- **Full e2e needs a local machine with TPM + FUSE, not CI.** `make test` runs
+  `cargo test --all`; TPM/mount/`status`/`toggle`/`umount` tests gate on
+  `/dev/tpmrm0` (+ `tss` group) and `gocryptfs`/`fusermount3`, so they skip on the
+  shared CI runner (ubuntu-latest, no TPM/FUSE) and run only locally. CI covers the
+  non-FUSE/non-TPM subset (escrow `install`/`check`/`recovery`, `backend.rs`).
+  Containerized/swtpm CI for TPM+FUSE is deliberately avoided: FUSE needs privileged
+  runners (flaky/unsafe), TPM needs swtpm + gating changes — not worth it. A
+  self-hosted runner with a real TPM would give full CI coverage later.
