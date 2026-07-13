@@ -64,9 +64,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let cfg = Config::load()?;
             Ok(exit(sctl::check::run(&cfg)))
         }
-        Command::Install { names } => {
+        Command::Install {
+            names,
+            gpg_pass,
+            yes,
+        } => {
             let cfg = Config::load()?;
-            sctl::install::run(&cfg, &sctl::install::InstallOpts { names })?;
+            sctl::install::run(
+                &cfg,
+                &sctl::install::InstallOpts {
+                    names,
+                    gpg_pass,
+                    yes,
+                },
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Recovery { filter } => {

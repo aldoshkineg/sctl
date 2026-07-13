@@ -85,6 +85,14 @@ pub enum Command {
         /// Restrict to these secret names (default: all managed secrets)
         #[arg(required = false)]
         names: Vec<String>,
+        /// Non-interactive gpg passphrase as NAME=PASSWORD (repeatable); the
+        /// NAME matches a `gpg_preset` secret. Secrets not listed are prompted
+        /// interactively.
+        #[arg(long = "gpg-pass", action = clap::ArgAction::Append)]
+        gpg_pass: Vec<String>,
+        /// Auto-confirm the "use encryption for gpg keys?" prompt.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Recover the secret map from the escrow container
     #[command(visible_alias = "rc")]

@@ -26,6 +26,7 @@ use crate::secret;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
 use rand::{Rng, rng};
+use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,12 @@ use zeroize::Zeroizing;
 pub struct InstallOpts {
     /// Restrict enrollment to these secret names (empty = all managed).
     pub names: Vec<String>,
+    /// Non-interactive gpg passphrases as `NAME=PASSWORD` entries, one per
+    /// `gpg_preset` secret (the `NAME` matches the secret's `name`). Secrets not
+    /// listed here fall back to the interactive prompt.
+    pub gpg_pass: Vec<String>,
+    /// Auto-confirm the "use encryption for gpg keys?" prompt.
+    pub yes: bool,
 }
 
 /// Source of an existing gpg key passphrase. Abstracted so tests can supply a
@@ -111,6 +118,53 @@ impl GpgPassProvider for ConstProvider<'_> {
         _grips: &[String],
     ) -> Result<Option<Zeroizing<String>>> {
         Ok(Some(Zeroizing::new(self.pass.to_string())))
+    }
+}
+
+/// Non-interactive gpg passphrase source from `--gpg-pass NAME=PASSWORD` flags.
+///
+/// Secrets present in the map are verified against their key (via gpg-agent, no
+/// tty) and returned; secrets absent fall back to the interactive
+/// [`PromptProvider`], so a mixed invocation can supply some passphrases
+/// non-interactively and prompt for the rest.
+pub struct MapGpgProvider {
+    map: HashMap<String, Zeroizing<String>>,
+}
+
+impl MapGpgProvider {
+    /// Parse `NAME=PASSWORD` entries. Both sides must be non-empty.
+    pub fn new(entries: &[String]) -> Result<Self> {
+        let mut map = HashMap::new();
+        for e in entries {
+            let Some((name, pw)) = e.split_once('=') else {
+                bail!("invalid --gpg-pass {e:?}: expected NAME=PASSWORD");
+            };
+            if name.is_empty() || pw.is_empty() {
+                bail!("--gpg-pass {e:?} needs a non-empty NAME and PASSWORD");
+            }
+            map.insert(name.to_string(), Zeroizing::new(pw.to_string()));
+        }
+        Ok(Self { map })
+    }
+}
+
+impl GpgPassProvider for MapGpgProvider {
+    fn get(
+        &self,
+        secret: &Secret,
+        home: &Path,
+        fpr: &str,
+        uid: &str,
+        grips: &[String],
+    ) -> Result<Option<Zeroizing<String>>> {
+        let Some(pw) = self.map.get(&secret.name) else {
+            return PromptProvider.get(secret, home, fpr, uid, grips);
+        };
+        if let Some(g) = grips.first() {
+            gpg::verify_passphrase(home, fpr, g, pw.as_bytes())
+                .with_context(|| format!("verifying gpg passphrase for '{}'", secret.name))?;
+        }
+        Ok(Some(pw.clone()))
     }
 }
 
@@ -351,13 +405,19 @@ pub fn run(cfg: &Config, opts: &InstallOpts) -> Result<()> {
             cfg.get(n)?;
         }
     }
-    let map = build_map(
-        cfg,
-        &PromptKey,
-        &PromptConfirm,
-        &PromptProvider,
-        &opts.names,
-    )?;
+    let prompt = PromptProvider;
+    let map_provider = MapGpgProvider::new(&opts.gpg_pass)?;
+    let gpg: &dyn GpgPassProvider = if opts.gpg_pass.is_empty() {
+        &prompt
+    } else {
+        &map_provider
+    };
+    let confirm: &dyn ConfirmProvider = if opts.yes {
+        &ConstConfirm(true)
+    } else {
+        &PromptConfirm
+    };
+    let map = build_map(cfg, &PromptKey, confirm, gpg, &opts.names)?;
     finalize(cfg, &map)?;
     eprintln!("installed {} secret(s) into the backend", map.len());
     Ok(())

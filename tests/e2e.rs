@@ -2,10 +2,11 @@
 //! lifecycle: `install` -> `check` -> `mount` (from the enrolled backend) ->
 //! `recovery` -> `umount`.
 //!
-//! `install` is fully non-interactive for a config without `gpg_preset` secrets
-//! (it reads `CRYPT_PASS` and `SCTL_MASTER_PASS` from the environment and asks
-//! no confirm prompt — see `src/install.rs` / `src/passfile.rs`), so the binary
-//! can be exercised as a black box.
+//! `install` is fully non-interactive (so the binary can be exercised as a black
+//! box): it reads `CRYPT_PASS` and `SCTL_MASTER_PASS` from the environment, takes
+//! the gpg passphrase from `--gpg-pass NAME=PASSWORD` (verified via gpg-agent,
+//! no tty — see `src/install.rs` / `src/passfile.rs`), and answers the "use
+//! encryption for gpg keys?" prompt with `--yes`.
 //!
 //! Gating:
 //! - The escrow `install`/`check`/`recovery` path needs no TPM or FUSE and runs
@@ -19,6 +20,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
+
+mod common;
 
 /// Serialize gocryptfs-backed tests: parallel FUSE mounts are flaky.
 static MOUNT_LOCK: Mutex<()> = Mutex::new(());
@@ -147,6 +150,19 @@ secret_backend = "tpm"
 path = ".vault"
 "#;
 
+/// `gpg_preset` variant of the escrow base: the secret's gpg home (`.gnupg`) is
+/// generated with real keys by the test before `install`.
+const GPG_BASE: &str = r#"
+[settings]
+default_idle = "10m"
+enc_root = "$ENC"
+secret_backend = "escrow"
+
+[secrets.vault]
+path = ".gnupg"
+gpg_preset = true
+"#;
+
 /// Extract the base64 value for `key` from `sctl recovery` stdout.
 fn recovery_value(stdout: &str, key: &str) -> String {
     stdout
@@ -228,6 +244,53 @@ fn escrow_install_then_mount_resolves_from_backend() {
         .assert()
         .success();
     assert!(!is_mounted(&sb.mnt(".vault")));
+}
+
+// --- gpg_preset: non-interactive install via --gpg-pass --------------------
+
+#[test]
+fn gpg_preset_install_enrolls_all_keys() {
+    if !common::have_gpg() {
+        eprintln!("skipping: gpg not available");
+        return;
+    }
+    let sb = Sandbox::new(GPG_BASE);
+    // Generate a real gpg home at the secret's mountpoint: 5 primary keys, each
+    // carrying sign + auth subkeys (a primary/subkey hierarchy). All share one
+    // passphrase, as `--gpg-pass` supplies a single passphrase per gpg home.
+    let gpg_pass = "gpg-top-secret";
+    let gpg_home = sb.path().join(".gnupg");
+    common::gen_gpg_home_at(&gpg_home, 5, gpg_pass);
+
+    // Fully non-interactive: gocryptfs key via CRYPT_PASS, gpg passphrase via
+    // --gpg-pass, master passphrase via SCTL_MASTER_PASS, confirm via --yes.
+    sb.cmd()
+        .args([
+            "install",
+            "--yes",
+            "--gpg-pass",
+            &format!("vault={gpg_pass}"),
+        ])
+        .assert()
+        .success();
+
+    // `recovery` must list one gpg entry per primary key (5) plus the shared
+    // gocryptfs key — proving the passphrases were enrolled through the binary.
+    let out = sb
+        .cmd()
+        .args(["recovery"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out);
+    let gpg_entries = text.lines().filter(|l| l.starts_with("gpg:vault:")).count();
+    assert_eq!(gpg_entries, 5, "expected 5 gpg entries, got:\n{text}");
+    assert!(
+        text.lines().any(|l| l.starts_with("gocryptfs:__shared__")),
+        "missing gocryptfs shared key:\n{text}"
+    );
 }
 
 // --- tpm: install / check / recovery --------------------------------------

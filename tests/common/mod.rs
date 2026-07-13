@@ -141,14 +141,14 @@ fn collect_keys(home: &PathBuf) -> Vec<GpgKey> {
     keys
 }
 
-/// Create an isolated GNUPGHOME with `n` master RSA keys, each carrying a
-/// `sign` subkey and an `auth` (ssh) subkey. All keys share `pass`.
-pub fn gen_gpg_home(n: usize, pass: &str) -> GpgHome {
+/// Generate a gpg home at an explicit `home` path (used by e2e tests where the
+/// home must live exactly at a secret's mountpoint). Same key layout as
+/// [`gen_gpg_home`]: `n` RSA primary keys, each carrying a `sign` and an
+/// `auth` (ssh) subkey — a real primary/subkey hierarchy. All keys share `pass`.
+pub fn gen_gpg_home_at(home: &PathBuf, n: usize, pass: &str) {
     assert!(have_gpg(), "gpg binary not found; fixture unavailable");
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path().join("gnupg");
-    fs::create_dir_all(&home).unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir_all(home).unwrap();
+    fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(
         home.join("gpg-agent.conf"),
         "allow-loopback-pinentry\nallow-preset-passphrase\n",
@@ -160,7 +160,7 @@ pub fn gen_gpg_home(n: usize, pass: &str) -> GpgHome {
         let uid = format!("Test User {i} <test{i}@example.com>");
         // Primary: cert+sign.
         run(
-            &home,
+            home,
             &[
                 "--yes",
                 "--pinentry-mode=loopback",
@@ -173,10 +173,10 @@ pub fn gen_gpg_home(n: usize, pass: &str) -> GpgHome {
                 "0",
             ],
         );
-        let fpr = primary_fprs(&home).pop().expect("primary fpr");
+        let fpr = primary_fprs(home).pop().expect("primary fpr");
         // sign subkey
         run(
-            &home,
+            home,
             &[
                 "--yes",
                 "--pinentry-mode=loopback",
@@ -191,7 +191,7 @@ pub fn gen_gpg_home(n: usize, pass: &str) -> GpgHome {
         );
         // auth (ssh) subkey
         run(
-            &home,
+            home,
             &[
                 "--yes",
                 "--pinentry-mode=loopback",
@@ -205,11 +205,39 @@ pub fn gen_gpg_home(n: usize, pass: &str) -> GpgHome {
             ],
         );
     }
+}
 
+/// Create an isolated GNUPGHOME with `n` master RSA keys, each carrying a
+/// `sign` subkey and an `auth` (ssh) subkey. All keys share `pass`.
+pub fn gen_gpg_home(n: usize, pass: &str) -> GpgHome {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path().join("gnupg");
+    gen_gpg_home_at(&home, n, pass);
     let keys = collect_keys(&home);
     GpgHome {
         _dir: dir,
         home,
         keys,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixture itself: 5 primaries, each with sign + auth subkeys.
+    #[test]
+    fn fixture_builds_gpg_hierarchy() {
+        if !have_gpg() {
+            eprintln!("skipping: gpg not available");
+            return;
+        }
+        let home = gen_gpg_home(5, "fixture-pass");
+        assert!(home.home.exists(), "gpg home dir must exist");
+        assert_eq!(home.keys.len(), 5, "expected 5 primary keys");
+        for k in &home.keys {
+            assert!(k.has_sign, "primary must carry a sign subkey");
+            assert!(k.has_auth, "primary must carry an auth subkey");
+        }
     }
 }

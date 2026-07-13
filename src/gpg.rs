@@ -51,7 +51,7 @@ pub fn preset(cfg: &Config, secret: &Secret) -> Result<()> {
             continue; // not enrolled (skipped at install)
         };
         for g in grips {
-            match run_preset(&bin, g, pass.as_slice()) {
+            match run_preset(&bin, &mnt, g, pass.as_slice()) {
                 Ok(()) => count += 1,
                 Err(e) => eprintln!("warning: gpg preset failed for keygrip {g}: {e:#}"),
             }
@@ -171,29 +171,25 @@ fn to_triple(c: (String, Option<String>, Vec<String>)) -> (String, String, Vec<S
     (c.0, c.1.unwrap_or_default(), c.2)
 }
 
-/// Verify a gpg key passphrase for real: cache the candidate via
-/// `gpg-preset-passphrase` and then export the secret key through the agent.
-/// `gpg-preset-passphrase --preset` alone only *caches* the passphrase (a typo
-/// is accepted silently), so we must exercise the key: exporting the secret key
-/// forces the agent to decrypt it with the cached passphrase, which fails on a
-/// wrong passphrase. On success the passphrase is left cached (avoids a later
-/// prompt). `fpr` selects the key; `keygrip` is the primary key's grip to cache.
-pub fn verify_passphrase(home: &Path, fpr: &str, keygrip: &str, passphrase: &[u8]) -> Result<()> {
-    Command::new("gpgconf")
-        .arg("--homedir")
-        .arg(home)
-        .arg("--launch")
-        .arg("gpg-agent")
-        .output()
-        .context("launching gpg-agent")?;
-    let bin = preset_bin()?;
-    run_preset(&bin, keygrip, passphrase)?;
-
+/// Verify a gpg key passphrase for real: decrypt the secret key with the
+/// candidate passphrase through loopback pinentry. This exercises the key
+/// directly (so a typo fails) and needs no gpg-agent cache, which makes it work
+/// for any homedir — including the non-default paths used in tests, where the
+/// agent cache would not be consulted. The passphrase is written to a 0600 temp
+/// file so it never appears on the command line. `fpr` selects the key;
+/// `keygrip` is accepted for API symmetry but unused here.
+pub fn verify_passphrase(home: &Path, fpr: &str, _keygrip: &str, passphrase: &[u8]) -> Result<()> {
+    // Write the candidate passphrase to a 0600 temp file (never exposed via ps).
+    let passfile =
+        crate::passfile::from_bytes(passphrase).context("writing gpg passphrase to temp file")?;
     let out = Command::new("gpg")
         .arg("--homedir")
         .arg(home)
         .arg("--batch")
         .arg("--yes")
+        .arg("--pinentry-mode=loopback")
+        .arg("--passphrase-file")
+        .arg(passfile.path())
         .arg("--output")
         .arg("/dev/null")
         .arg("--export-secret-keys")
@@ -228,10 +224,14 @@ fn preset_bin() -> Result<PathBuf> {
 }
 
 /// Feed the passphrase to `gpg-preset-passphrase --preset <keygrip>` via stdin.
-fn run_preset(bin: &Path, keygrip: &str, passphrase: &[u8]) -> Result<()> {
+/// `GNUPGHOME` is set explicitly so the preset lands in the *same* agent that
+/// the (custom-homedir) `gpg` export below talks to — otherwise the passphrase
+/// would be cached in the default agent and the export would still prompt.
+fn run_preset(bin: &Path, home: &Path, keygrip: &str, passphrase: &[u8]) -> Result<()> {
     let mut child = Command::new(bin)
         .arg("--preset")
         .arg(keygrip)
+        .env("GNUPGHOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
