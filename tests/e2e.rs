@@ -307,3 +307,59 @@ fn tpm_install_then_mount_resolves_from_backend() {
         .success();
     assert!(!is_mounted(&sb.mnt(".vault")));
 }
+
+/// Shared lifecycle: enroll the backend, mount a secret resolving the
+/// gocryptfs password from the backend (no `CRYPT_PASS`), then verify `status`
+/// reflects mounted/unmounted and `toggle` flips the mount state. `needs_tpm`
+/// selects the TPM gating in addition to gocryptfs.
+fn status_toggle_lifecycle(base: &str, needs_tpm: bool) {
+    if !have_gocryptfs() || (needs_tpm && !tpm_available()) {
+        eprintln!(
+            "skipping: gocryptfs{} not available",
+            if needs_tpm { " / TPM" } else { "" }
+        );
+        return;
+    }
+    let _guard = mount_guard();
+    let sb = Sandbox::new(base);
+
+    sb.cmd().args(["init", "vault"]).assert().success();
+    sb.cmd().arg("install").assert().success();
+
+    // Mount resolves the password from the backend, not CRYPT_PASS.
+    sb.cmd_no_crypt()
+        .args(["mount", "vault"])
+        .assert()
+        .success();
+    assert!(is_mounted(&sb.mnt(".vault")));
+    sb.cmd()
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mounted"));
+
+    // toggle off -> unmounted, status reflects it.
+    sb.cmd().args(["toggle", "vault"]).assert().success();
+    assert!(!is_mounted(&sb.mnt(".vault")));
+    sb.cmd()
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unmounted"));
+
+    // toggle on -> mounted again.
+    sb.cmd().args(["toggle", "vault"]).assert().success();
+    assert!(is_mounted(&sb.mnt(".vault")));
+
+    sb.cmd().args(["umount", "vault"]).assert().success();
+}
+
+#[test]
+fn escrow_install_mount_status_toggle() {
+    status_toggle_lifecycle(ESCROW_BASE, false);
+}
+
+#[test]
+fn tpm_install_mount_status_toggle() {
+    status_toggle_lifecycle(TPM_BASE, true);
+}
