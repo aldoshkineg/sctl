@@ -70,6 +70,31 @@ pub fn gen_ssh_home_at(dir: &std::path::Path, n: usize, pass: &str) {
     }
 }
 
+/// Generate ssh key pairs at an explicit `dir` path, one per entry in
+/// `passwords` (basename `id_ed25519_<i>`, comment = basename), each with its
+/// own passphrase. Used to exercise per-key `--ssh-pass` addressing.
+pub fn gen_ssh_home_at_multi(dir: &std::path::Path, passwords: &[&str]) {
+    assert!(
+        have_ssh(),
+        "ssh-keygen binary not found; fixture unavailable"
+    );
+    fs::create_dir_all(dir).unwrap();
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    for (i, &pass) in passwords.iter().enumerate() {
+        let name = format!("id_ed25519_{i}");
+        let mut c = Command::new("ssh-keygen");
+        c.args(["-t", "ed25519", "-f"])
+            .arg(dir.join(&name))
+            .args(["-N", pass, "-C", &name]);
+        let out = c.output().expect("spawn ssh-keygen");
+        assert!(
+            out.status.success(),
+            "ssh-keygen failed for {name}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 fn gpg(home: &PathBuf) -> Command {
     let mut c = Command::new("gpg");
     c.arg("--homedir").arg(home).arg("--batch");
@@ -290,6 +315,34 @@ mod tests {
         assert_eq!(keys.len(), 3, "expected 3 ssh private keys");
         for k in &keys {
             assert!(k.fingerprint.starts_with("SHA256:"));
+        }
+    }
+
+    /// The per-key ssh fixture: each key gets its own passphrase.
+    #[test]
+    fn fixture_builds_ssh_home_per_key() {
+        if !have_ssh() {
+            eprintln!("skipping: ssh-keygen not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ssh");
+        let passwords = ["alpha", "bravo", "charlie"];
+        gen_ssh_home_at_multi(&p, &passwords);
+        let keys = sctl::ssh::keys_in_dir(&p).unwrap();
+        assert_eq!(keys.len(), 3, "expected 3 ssh private keys");
+        // Each key must verify with its own password, and fail with a wrong one.
+        for (k, pw) in keys.iter().zip(passwords.iter()) {
+            assert!(
+                sctl::ssh::verify_passphrase(&p, &k.path, pw.as_bytes()).is_ok(),
+                "correct passphrase rejected for {}",
+                k.fingerprint
+            );
+            assert!(
+                sctl::ssh::verify_passphrase(&p, &k.path, b"wrong").is_err(),
+                "wrong passphrase accepted for {}",
+                k.fingerprint
+            );
         }
     }
 }

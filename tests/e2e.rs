@@ -306,6 +306,47 @@ fn ssh_preset_install_enrolls_all_keys() {
     );
 }
 
+// --- ssh_preset: per-key --ssh-pass (different passwords) ------------------
+
+#[test]
+fn ssh_preset_install_per_key_passwords() {
+    if !common::have_ssh() {
+        eprintln!("skipping: ssh-keygen not available");
+        return;
+    }
+    let sb = Sandbox::new(SSH_BASE);
+    // Three long-lived keys, each with its own passphrase.
+    let passwords = ["alpha-pass", "bravo-pass", "charlie-pass"];
+    let ssh_dir = sb.path().join(".ssh");
+    common::gen_ssh_home_at_multi(&ssh_dir, &passwords);
+
+    // One `--ssh-pass NAME:KEY=PASSWORD` per key, addressed by filename.
+    let mut cmd = sb.cmd();
+    cmd.args(["install", "--yes"]);
+    for (i, p) in passwords.iter().enumerate() {
+        cmd.args(["--ssh-pass", &format!("vault:id_ed25519_{i}={p}")]);
+    }
+    cmd.assert().success();
+
+    // `recovery` must list one ssh entry per key (3) plus the shared gocryptfs
+    // key — proving each distinct passphrase was enrolled through the binary.
+    let out = sb
+        .cmd()
+        .args(["recovery"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out);
+    let ssh_entries = text.lines().filter(|l| l.starts_with("ssh:vault:")).count();
+    assert_eq!(ssh_entries, 3, "expected 3 ssh entries, got:\n{text}");
+    assert!(
+        text.lines().any(|l| l.starts_with("gocryptfs:__shared__")),
+        "missing gocryptfs shared key:\n{text}"
+    );
+}
+
 // --- gpg_preset: non-interactive install via --gpg-pass --------------------
 
 #[test]
