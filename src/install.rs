@@ -316,7 +316,15 @@ pub fn finalize(cfg: &Config, map: &escrow::SecretMap) -> Result<()> {
     // `install` always rewrites the whole backend, so back up any existing
     // configuration first — this is the only safety net against an accidental
     // re-enroll (e.g. answering "no" to gpg encryption drops the old gpg keys).
+    // The in-memory setup (build_map, collecting every passphrase) is already
+    // complete by the time we get here.
     backup_existing(cfg)?;
+    // Confirm the master passphrase before applying anything to disk. A typo
+    // would lock the whole backend, and gating every write here guarantees we
+    // never leave a half-applied backend (e.g. the TPM DEK sealed but the map
+    // or escrow recovery missing). `seal_dek` also writes `dek.priv`/`dek.pub`,
+    // so it too must sit behind this gate.
+    let master = secret::read_master_passphrase_confirm(cfg)?;
     match cfg.secret_backend {
         SecretBackend::Tpm => {
             let mut dek = Zeroizing::new(vec![0u8; 32]);
@@ -328,13 +336,11 @@ pub fn finalize(cfg: &Config, map: &escrow::SecretMap) -> Result<()> {
             write_atomic(&cfg.tpm_map_file(), &blob)?;
 
             // Recovery backup: master-passphrase copy, read only by `sctl recovery`.
-            let master = secret::read_master_passphrase_confirm(cfg)?;
             let escrow_blob = escrow::seal(map, &master).context("sealing escrow backup")?;
             write_atomic(&cfg.escrow_file, &escrow_blob)?;
             Ok(())
         }
         SecretBackend::Escrow => {
-            let master = secret::read_master_passphrase_confirm(cfg)?;
             let blob = escrow::seal(map, &master).context("sealing escrow container")?;
             write_atomic(&cfg.escrow_file, &blob)?;
             Ok(())
