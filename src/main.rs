@@ -67,7 +67,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Install {
             names,
             gpg_pass,
-            ssh_pass,
             yes,
         } => {
             let cfg = Config::load()?;
@@ -76,7 +75,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 &sctl::install::InstallOpts {
                     names,
                     gpg_pass,
-                    ssh_pass,
                     yes,
                 },
             )?;

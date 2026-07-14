@@ -128,11 +128,6 @@ pub fn mount_one(cfg: &Config, secret: &Secret, opts: MountOpts) -> Result<()> {
     {
         eprintln!("warning: gpg preset failed: {e:#}");
     }
-    if secret.ssh_preset
-        && let Err(e) = crate::ssh::preset(cfg, secret)
-    {
-        eprintln!("warning: ssh preset failed: {e:#}");
-    }
     sys::run_hooks("post_mount", &secret.post_mount)?;
     Ok(())
 }

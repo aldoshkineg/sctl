@@ -163,19 +163,6 @@ path = ".gnupg"
 gpg_preset = true
 "#;
 
-/// `ssh_preset` variant of the escrow base: the secret's ssh home (`.ssh`) is
-/// generated with real key pairs by the test before `install`.
-const SSH_BASE: &str = r#"
-[settings]
-default_idle = "10m"
-enc_root = "$ENC"
-secret_backend = "escrow"
-
-[secrets.vault]
-path = ".ssh"
-ssh_preset = true
-"#;
-
 /// Extract the base64 value for `key` from `sctl recovery` stdout.
 fn recovery_value(stdout: &str, key: &str) -> String {
     stdout
@@ -257,53 +244,6 @@ fn escrow_install_then_mount_resolves_from_backend() {
         .assert()
         .success();
     assert!(!is_mounted(&sb.mnt(".vault")));
-}
-
-// --- ssh_preset: non-interactive install via --ssh-pass -------------------
-
-#[test]
-fn ssh_preset_install_enrolls_all_keys() {
-    if !common::have_ssh() {
-        eprintln!("skipping: ssh-keygen not available");
-        return;
-    }
-    let sb = Sandbox::new(SSH_BASE);
-    // Generate a real ssh home at the secret's mountpoint: 5 ed25519 key pairs,
-    // all sharing one passphrase (as `--ssh-pass` supplies a single passphrase
-    // per ssh home).
-    let ssh_pass = "ssh-top-secret";
-    let ssh_dir = sb.path().join(".ssh");
-    common::gen_ssh_home_at(&ssh_dir, 5, ssh_pass);
-
-    // Fully non-interactive: gocryptfs key via CRYPT_PASS, ssh passphrase via
-    // --ssh-pass, master passphrase via SCTL_MASTER_PASS, confirm via --yes.
-    sb.cmd()
-        .args([
-            "install",
-            "--yes",
-            "--ssh-pass",
-            &format!("vault={ssh_pass}"),
-        ])
-        .assert()
-        .success();
-
-    // `recovery` must list one ssh entry per key (5) plus the shared gocryptfs
-    // key — proving the passphrases were enrolled through the binary.
-    let out = sb
-        .cmd()
-        .args(["recovery"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8_lossy(&out);
-    let ssh_entries = text.lines().filter(|l| l.starts_with("ssh:vault:")).count();
-    assert_eq!(ssh_entries, 5, "expected 5 ssh entries, got:\n{text}");
-    assert!(
-        text.lines().any(|l| l.starts_with("gocryptfs:__shared__")),
-        "missing gocryptfs shared key:\n{text}"
-    );
 }
 
 // --- gpg_preset: non-interactive install via --gpg-pass --------------------

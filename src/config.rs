@@ -61,11 +61,6 @@ struct RawSecret {
     /// Preset secret-key passphrases into gpg-agent after mounting.
     #[serde(default)]
     gpg_preset: bool,
-    /// Preset ssh key passphrases into ssh-agent after mounting: `install`
-    /// enrolls every private key's passphrase in this home into the backend, and
-    /// `mount` adds the keys to ssh-agent from the backend (no prompts).
-    #[serde(default)]
-    ssh_preset: bool,
     /// Process names (comm) that may be killed silently on a busy unmount.
     #[serde(default)]
     auto_kill: Vec<String>,
@@ -98,8 +93,6 @@ pub struct Secret {
     pub gpg: bool,
     /// Preset secret-key passphrases into gpg-agent after mounting.
     pub gpg_preset: bool,
-    /// Preset ssh key passphrases into ssh-agent after mounting.
-    pub ssh_preset: bool,
     /// Process names (comm) that may be killed silently on a busy unmount.
     pub auto_kill: Vec<String>,
     /// Force-unmount if stuck busy longer than `kill_busy_after` (watcher).
@@ -233,7 +226,6 @@ impl Config {
                     depends: r.depends,
                     gpg: r.gpg,
                     gpg_preset: r.gpg_preset,
-                    ssh_preset: r.ssh_preset,
                     auto_kill: r.auto_kill,
                     kill_busy: r.kill_busy.unwrap_or(false),
                     kill_busy_after: r.kill_busy_after,
@@ -388,7 +380,6 @@ mod tests {
             depends: vec![],
             gpg: false,
             gpg_preset: false,
-            ssh_preset: false,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,

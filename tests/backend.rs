@@ -9,7 +9,7 @@
 mod common;
 
 use sctl::config::{Config, Secret, SecretBackend};
-use sctl::install::{ConstConfirm, ConstKey, ConstProvider, ConstSshProvider, build_map, finalize};
+use sctl::install::{ConstConfirm, ConstKey, ConstProvider, build_map, finalize};
 use sctl::recovery;
 use sctl::secret;
 use std::path::Path;
@@ -37,7 +37,6 @@ fn cfg_for(
             depends: vec![],
             gpg: true,
             gpg_preset: true,
-            ssh_preset: false,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,
@@ -114,7 +113,6 @@ fn install_recovery_roundtrip_escrow() {
         &ConstKey { key: G },
         &ConstConfirm(true),
         &ConstProvider { pass: PASS },
-        &ConstSshProvider { pass: PASS },
         &[],
     )
     .unwrap();
@@ -166,7 +164,6 @@ fn install_resolve_secret_tpm_no_desync() {
         &ConstKey { key: G },
         &ConstConfirm(true),
         &ConstProvider { pass: PASS },
-        &ConstSshProvider { pass: PASS },
         &[],
     )
     .unwrap();

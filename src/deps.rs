@@ -203,7 +203,6 @@ mod tests {
             depends: depends.iter().map(|s| s.to_string()).collect(),
             gpg: false,
             gpg_preset: false,
-            ssh_preset: false,
             auto_kill: vec![],
             kill_busy: false,
             kill_busy_after: None,

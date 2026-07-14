@@ -23,7 +23,6 @@ use crate::config::{Config, Secret, SecretBackend};
 use crate::escrow;
 use crate::gpg;
 use crate::secret;
-use crate::ssh;
 use crate::tpm;
 use anyhow::{Context, Result, bail};
 use rand::{Rng, rng};
@@ -42,11 +41,7 @@ pub struct InstallOpts {
     /// `gpg_preset` secret (the `NAME` matches the secret's `name`). Secrets not
     /// listed here fall back to the interactive prompt.
     pub gpg_pass: Vec<String>,
-    /// Non-interactive ssh passphrases as `NAME=PASSWORD` entries, one per
-    /// `ssh_preset` secret (the `NAME` matches the secret's `name`). Secrets not
-    /// listed here fall back to the interactive prompt.
-    pub ssh_pass: Vec<String>,
-    /// Auto-confirm the "use encryption for gpg/ssh keys?" prompts.
+    /// Auto-confirm the "use encryption for gpg keys?" prompt.
     pub yes: bool,
 }
 
@@ -173,124 +168,6 @@ impl GpgPassProvider for MapGpgProvider {
     }
 }
 
-/// Source of an existing ssh key passphrase. Abstracted so tests can supply a
-/// known value without an interactive prompt. `dir` is the mounted ssh home
-/// (used to verify the passphrase); `comment` is the key's comment (`-C`) for a
-/// human-readable prompt; `key_path` is the private key file (used to verify).
-///
-/// Returns `None` to *skip* this key (exclude it from backend enrollment).
-pub trait SshPassProvider {
-    fn get(
-        &self,
-        secret: &Secret,
-        dir: &Path,
-        fingerprint: &str,
-        comment: &str,
-        key_path: &Path,
-    ) -> Result<Option<Zeroizing<String>>>;
-}
-
-/// Real provider: prompt on the terminal, verifying the passphrase against the
-/// key via `ssh-keygen` so a typo is caught immediately. An empty entry (just
-/// Enter) *skips* the key.
-pub struct PromptSshProvider;
-
-impl SshPassProvider for PromptSshProvider {
-    fn get(
-        &self,
-        secret: &Secret,
-        dir: &Path,
-        fingerprint: &str,
-        comment: &str,
-        key_path: &Path,
-    ) -> Result<Option<Zeroizing<String>>> {
-        let shown = &fingerprint[..fingerprint.len().min(24)];
-        let label = format!(
-            "Passphrase for ssh key {} ({}) [secret '{}'] (empty = skip this key): ",
-            shown, comment, secret.name
-        );
-        loop {
-            let pass = Zeroizing::new(
-                rpassword::prompt_password(&label).context("reading ssh passphrase")?,
-            );
-            if pass.is_empty() {
-                eprintln!("skipping ssh key {shown}");
-                return Ok(None);
-            }
-            match ssh::verify_passphrase(dir, key_path, pass.as_bytes()) {
-                Ok(()) => return Ok(Some(pass)),
-                Err(e) => {
-                    eprintln!("passphrase verification failed ({e:#}); try again");
-                    continue;
-                }
-            }
-        }
-    }
-}
-
-/// Known-value provider for tests.
-pub struct ConstSshProvider<'a> {
-    pub pass: &'a str,
-}
-
-impl SshPassProvider for ConstSshProvider<'_> {
-    fn get(
-        &self,
-        _secret: &Secret,
-        _dir: &Path,
-        _fingerprint: &str,
-        _comment: &str,
-        _key_path: &Path,
-    ) -> Result<Option<Zeroizing<String>>> {
-        Ok(Some(Zeroizing::new(self.pass.to_string())))
-    }
-}
-
-/// Non-interactive ssh passphrase source from `--ssh-pass NAME=PASSWORD` flags.
-///
-/// Secrets present in the map are verified against their key (via `ssh-keygen`,
-/// no tty) and returned; secrets absent fall back to the interactive
-/// [`PromptSshProvider`], so a mixed invocation can supply some passphrases
-/// non-interactively and prompt for the rest.
-pub struct MapSshProvider {
-    map: HashMap<String, Zeroizing<String>>,
-}
-
-impl MapSshProvider {
-    /// Parse `NAME=PASSWORD` entries. Both sides must be non-empty.
-    pub fn new(entries: &[String]) -> Result<Self> {
-        let mut map = HashMap::new();
-        for e in entries {
-            let Some((name, pw)) = e.split_once('=') else {
-                bail!("invalid --ssh-pass {e:?}: expected NAME=PASSWORD");
-            };
-            if name.is_empty() || pw.is_empty() {
-                bail!("--ssh-pass {e:?} needs a non-empty NAME and PASSWORD");
-            }
-            map.insert(name.to_string(), Zeroizing::new(pw.to_string()));
-        }
-        Ok(Self { map })
-    }
-}
-
-impl SshPassProvider for MapSshProvider {
-    fn get(
-        &self,
-        secret: &Secret,
-        dir: &Path,
-        fingerprint: &str,
-        comment: &str,
-        key_path: &Path,
-    ) -> Result<Option<Zeroizing<String>>> {
-        let Some(pw) = self.map.get(&secret.name) else {
-            return PromptSshProvider.get(secret, dir, fingerprint, comment, key_path);
-        };
-        ssh::verify_passphrase(dir, key_path, pw.as_bytes())
-            .with_context(|| format!("verifying ssh passphrase for '{}'", secret.name))?;
-        Ok(Some(pw.clone()))
-    }
-}
-
 /// Source of a yes/no confirmation. Abstracted so tests can supply a known
 /// answer without an interactive prompt.
 pub trait ConfirmProvider {
@@ -353,18 +230,16 @@ impl GocryptfsKeyProvider for ConstKey<'_> {
 
 /// Build the secret map to enroll.
 ///
-/// `names` restricts which managed homes are enrolled (empty = all). The shared
-/// gocryptfs key is always enrolled (from `g_provider`). For gpg keys
-/// (`gpg_preset`) and ssh keys (`ssh_preset`), `confirm` is asked once per kind
-/// whether to enroll them: if declined, that kind is skipped and only `G` is
-/// written (the previous entries, if any, stay only in the pre-install backup
-/// made by `finalize`).
+/// `names` restricts which `gpg_preset` gpg homes are enrolled (empty = all). The
+/// shared gocryptfs key is always enrolled (from `g_provider`). For gpg keys,
+/// `confirm` is asked once whether to enroll them: if declined, the gpg homes
+/// are skipped and only `G` is written (the previous gpg entries, if any, stay
+/// only in the pre-install backup made by `finalize`).
 pub fn build_map(
     cfg: &Config,
     g_provider: &dyn GocryptfsKeyProvider,
     confirm: &dyn ConfirmProvider,
-    gpg_provider: &dyn GpgPassProvider,
-    ssh_provider: &dyn SshPassProvider,
+    provider: &dyn GpgPassProvider,
     names: &[String],
 ) -> Result<escrow::SecretMap> {
     let mut map = escrow::SecretMap::new();
@@ -411,60 +286,12 @@ pub fn build_map(
             bail!("no gpg secret keys found for secret '{}'", secret.name);
         }
         for (fpr, uid, grips) in keys {
-            let Some(pass) = gpg_provider.get(secret, &home, &fpr, &uid, &grips)? else {
+            let Some(pass) = provider.get(secret, &home, &fpr, &uid, &grips)? else {
                 continue; // key skipped by the user (empty passphrase entry)
             };
             let pass_bytes = Zeroizing::new(pass.as_bytes().to_vec());
             map.insert(
                 secret::composite_key("gpg", &secret::gpg_id_tail(&secret.name, &fpr)),
-                pass_bytes,
-            );
-        }
-    }
-
-    // Ask once whether to enroll ssh key passphrases into the backend.
-    let enrolls_ssh = cfg
-        .secrets
-        .values()
-        .any(|s| s.ssh_preset && (names.is_empty() || names.contains(&s.name)));
-    let use_ssh_enc = if enrolls_ssh {
-        confirm.confirm("Use encryption for ssh keys? [y/N] ")?
-    } else {
-        false
-    };
-
-    for secret in cfg.secrets.values() {
-        if !secret.ssh_preset {
-            continue;
-        }
-        if !names.is_empty() && !names.contains(&secret.name) {
-            continue;
-        }
-        if !use_ssh_enc {
-            continue;
-        }
-        let dir = secret.mountpoint(&cfg.home);
-        if !dir.exists() {
-            bail!(
-                "ssh home for secret '{}' does not exist at {}",
-                secret.name,
-                dir.display()
-            );
-        }
-        let keys = ssh::keys_in_dir(&dir)
-            .with_context(|| format!("listing ssh keys for '{}'", secret.name))?;
-        if keys.is_empty() {
-            bail!("no ssh keys found for secret '{}'", secret.name);
-        }
-        for key in keys {
-            let Some(pass) =
-                ssh_provider.get(secret, &dir, &key.fingerprint, &key.comment, &key.path)?
-            else {
-                continue; // key skipped by the user (empty passphrase entry)
-            };
-            let pass_bytes = Zeroizing::new(pass.as_bytes().to_vec());
-            map.insert(
-                secret::composite_key("ssh", &secret::ssh_id_tail(&secret.name, &key.fingerprint)),
                 pass_bytes,
             );
         }
@@ -585,18 +412,12 @@ pub fn run(cfg: &Config, opts: &InstallOpts) -> Result<()> {
     } else {
         &map_provider
     };
-    let map_ssh_provider = MapSshProvider::new(&opts.ssh_pass)?;
-    let ssh: &dyn SshPassProvider = if opts.ssh_pass.is_empty() {
-        &PromptSshProvider
-    } else {
-        &map_ssh_provider
-    };
     let confirm: &dyn ConfirmProvider = if opts.yes {
         &ConstConfirm(true)
     } else {
         &PromptConfirm
     };
-    let map = build_map(cfg, &PromptKey, confirm, gpg, ssh, &opts.names)?;
+    let map = build_map(cfg, &PromptKey, confirm, gpg, &opts.names)?;
     finalize(cfg, &map)?;
     eprintln!("installed {} secret(s) into the backend", map.len());
     Ok(())
