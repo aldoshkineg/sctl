@@ -169,6 +169,49 @@ pub fn read_master_passphrase_noninteractive(cfg: &Config) -> Result<Zeroizing<S
     master_passphrase_inner(cfg, false)
 }
 
+/// Resolve the master passphrase for the `install` write path. Non-interactive
+/// sources (`SCTL_MASTER_PASS` env, `master_passphrase_file`) are returned
+/// unchanged without a second prompt; otherwise the passphrase is prompted
+/// twice and the two entries must match — a typo'd master passphrase would lock
+/// the entire backend irrecoverably until a re-install.
+fn get_master_passphrase_confirm(cfg: &Config) -> Result<Zeroizing<String>> {
+    if let Some(s) = std::env::var_os("SCTL_MASTER_PASS") {
+        return Ok(Zeroizing::new(s.to_string_lossy().into_owned()));
+    }
+    if let Some(path) = &cfg.master_passphrase_file
+        && path.is_file()
+    {
+        let data = Zeroizing::new(
+            std::fs::read(path)
+                .with_context(|| format!("reading master passphrase file {}", path.display()))?,
+        );
+        return Ok(Zeroizing::new(
+            String::from_utf8_lossy(&data).trim().to_string(),
+        ));
+    }
+    let pw1 =
+        rpassword::prompt_password("Master passphrase: ").context("reading master passphrase")?;
+    let pw2 = rpassword::prompt_password("Confirm master passphrase: ")
+        .context("reading master passphrase confirmation")?;
+    if pw1 != pw2 {
+        bail!("master passphrases do not match");
+    }
+    Ok(Zeroizing::new(pw1))
+}
+
+/// Like [`read_master_passphrase`], but on the interactive path prompts twice
+/// and requires the two entries to match. Intended for the `install`/`finalize`
+/// write path, where a typo'd master passphrase would lock the whole backend
+/// irrecoverably. Non-interactive sources bypass the second prompt (a mismatch
+/// there is the operator's responsibility). Cached for the session.
+pub fn read_master_passphrase_confirm(cfg: &Config) -> Result<Zeroizing<String>> {
+    if let Some(p) = MASTER_CACHE.get() {
+        return Ok(p.clone());
+    }
+    let p = get_master_passphrase_confirm(cfg)?;
+    Ok(MASTER_CACHE.get_or_init(|| p).clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

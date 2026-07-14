@@ -328,13 +328,13 @@ pub fn finalize(cfg: &Config, map: &escrow::SecretMap) -> Result<()> {
             write_atomic(&cfg.tpm_map_file(), &blob)?;
 
             // Recovery backup: master-passphrase copy, read only by `sctl recovery`.
-            let master = secret::read_master_passphrase(cfg)?;
+            let master = secret::read_master_passphrase_confirm(cfg)?;
             let escrow_blob = escrow::seal(map, &master).context("sealing escrow backup")?;
             write_atomic(&cfg.escrow_file, &escrow_blob)?;
             Ok(())
         }
         SecretBackend::Escrow => {
-            let master = secret::read_master_passphrase(cfg)?;
+            let master = secret::read_master_passphrase_confirm(cfg)?;
             let blob = escrow::seal(map, &master).context("sealing escrow container")?;
             write_atomic(&cfg.escrow_file, &blob)?;
             Ok(())
