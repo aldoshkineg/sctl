@@ -90,11 +90,9 @@ pub enum Command {
         /// interactively.
         #[arg(long = "gpg-pass", action = clap::ArgAction::Append)]
         gpg_pass: Vec<String>,
-        /// Non-interactive ssh passphrase (repeatable), mirroring `--gpg-pass`.
-        /// `NAME=PASSWORD` sets one password for every key in the `ssh_preset`
-        /// secret `NAME`; `NAME:KEY=PASSWORD` sets the password for the single
-        /// key in `NAME` whose filename/comment is `KEY`. Keys not listed are
-        /// prompted interactively.
+        /// Non-interactive ssh passphrase as NAME=PASSWORD (repeatable); the
+        /// NAME matches a `ssh_preset` secret. Secrets not listed are prompted
+        /// interactively.
         #[arg(long = "ssh-pass", action = clap::ArgAction::Append)]
         ssh_pass: Vec<String>,
         /// Auto-confirm the "use encryption for gpg/ssh keys?" prompts.

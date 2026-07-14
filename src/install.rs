@@ -246,55 +246,28 @@ impl SshPassProvider for ConstSshProvider<'_> {
     }
 }
 
-/// A single `--ssh-pass` entry. `None` key = whole-home password; `Some(k)` =
-/// per-key password for the key whose basename/comment equals `k`.
-type SshPassEntry = (Option<String>, Zeroizing<String>);
-
-/// Non-interactive ssh passphrase source from `--ssh-pass` flags. Mirrors
-/// [`MapGpgProvider`] (which uses `NAME=PASSWORD` for a whole gpg home):
-/// - `NAME=PASSWORD` — one password for *every* key in the `ssh_preset` secret
-///   `NAME` (e.g. `vault=PASS`);
-/// - `NAME:KEY=PASSWORD` — password for the single key in secret `NAME` whose
-///   filename or comment is `KEY` (e.g. `vault:id_ed25519_0=PASS`).
+/// Non-interactive ssh passphrase source from `--ssh-pass NAME=PASSWORD` flags.
 ///
-/// Keys not supplied fall back to the interactive [`PromptSshProvider`], so a
-/// mixed invocation can supply some passphrases non-interactively and prompt
-/// for the rest.
+/// Secrets present in the map are verified against their key (via `ssh-keygen`,
+/// no tty) and returned; secrets absent fall back to the interactive
+/// [`PromptSshProvider`], so a mixed invocation can supply some passphrases
+/// non-interactively and prompt for the rest.
 pub struct MapSshProvider {
-    /// secret name -> entries. `None` key = whole-home password; `Some(k)` =
-    /// per-key password for the key whose basename/comment equals `k`.
-    map: HashMap<String, Vec<SshPassEntry>>,
+    map: HashMap<String, Zeroizing<String>>,
 }
 
 impl MapSshProvider {
-    /// Parse `NAME=PASSWORD` (whole-home) or `NAME:KEY=PASSWORD` (per-key).
-    /// All parts non-empty.
+    /// Parse `NAME=PASSWORD` entries. Both sides must be non-empty.
     pub fn new(entries: &[String]) -> Result<Self> {
-        let mut map: HashMap<String, Vec<SshPassEntry>> = HashMap::new();
+        let mut map = HashMap::new();
         for e in entries {
-            let Some((left, pw)) = e.split_once('=') else {
-                bail!("invalid --ssh-pass {e:?}: expected NAME=PASSWORD or NAME:KEY=PASSWORD");
+            let Some((name, pw)) = e.split_once('=') else {
+                bail!("invalid --ssh-pass {e:?}: expected NAME=PASSWORD");
             };
-            if pw.is_empty() {
-                bail!("--ssh-pass {e:?} needs a non-empty PASSWORD");
+            if name.is_empty() || pw.is_empty() {
+                bail!("--ssh-pass {e:?} needs a non-empty NAME and PASSWORD");
             }
-            let (name, key) = match left.split_once(':') {
-                Some((name, key)) => {
-                    if name.is_empty() || key.is_empty() {
-                        bail!("--ssh-pass {e:?} needs a non-empty NAME and KEY");
-                    }
-                    (name.to_string(), Some(key.to_string()))
-                }
-                None => {
-                    if left.is_empty() {
-                        bail!("--ssh-pass {e:?} needs a non-empty NAME");
-                    }
-                    (left.to_string(), None)
-                }
-            };
-            map.entry(name)
-                .or_default()
-                .push((key, Zeroizing::new(pw.to_string())));
+            map.insert(name.to_string(), Zeroizing::new(pw.to_string()));
         }
         Ok(Self { map })
     }
@@ -309,35 +282,12 @@ impl SshPassProvider for MapSshProvider {
         comment: &str,
         key_path: &Path,
     ) -> Result<Option<Zeroizing<String>>> {
-        let Some(entries) = self.map.get(&secret.name) else {
+        let Some(pw) = self.map.get(&secret.name) else {
             return PromptSshProvider.get(secret, dir, fingerprint, comment, key_path);
         };
-        let basename = key_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        // 1) Per-key entry matching this key's filename or comment.
-        for (key, pw) in entries {
-            if let Some(k) = key
-                && (k.as_str() == basename.as_str() || k.as_str() == comment)
-            {
-                ssh::verify_passphrase(dir, key_path, pw.as_bytes()).with_context(|| {
-                    format!("verifying ssh passphrase for '{}.{}'", secret.name, k)
-                })?;
-                return Ok(Some(pw.clone()));
-            }
-        }
-        // 2) Whole-home password (applies to every key in this secret).
-        for (key, pw) in entries {
-            if key.is_none() {
-                ssh::verify_passphrase(dir, key_path, pw.as_bytes())
-                    .with_context(|| format!("verifying ssh passphrase for '{}'", secret.name))?;
-                return Ok(Some(pw.clone()));
-            }
-        }
-        // 3) Not supplied non-interactively: fall back to the interactive prompt.
-        PromptSshProvider.get(secret, dir, fingerprint, comment, key_path)
+        ssh::verify_passphrase(dir, key_path, pw.as_bytes())
+            .with_context(|| format!("verifying ssh passphrase for '{}'", secret.name))?;
+        Ok(Some(pw.clone()))
     }
 }
 
