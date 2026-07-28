@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "sctl"
-version = "0.9.14"
+version = "0.9.15"
 dependencies = [
  "age",
  "anyhow",

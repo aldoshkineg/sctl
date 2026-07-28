@@ -254,6 +254,15 @@ fn gpg_preset_install_enrolls_all_keys() {
         eprintln!("skipping: gpg not available");
         return;
     }
+    // gpg 2.5 keeps a single global "flat" agent at /run/user/<uid>. The keys
+    // below are generated into a *temporary* gpg home; if the ambient agent was
+    // started under the real $HOME it refuses to serve a different homedir, so
+    // `gpg --list-secret-keys` (used by `sctl install`) returns nothing and the
+    // install fails. Killing the agent lets a fresh one spawn that serves this
+    // sandbox's home. Best-effort: ignored if no agent is running.
+    let _ = std::process::Command::new("gpgconf")
+        .args(["--kill", "gpg-agent"])
+        .output();
     let sb = Sandbox::new(GPG_BASE);
     // Generate a real gpg home at the secret's mountpoint: 5 primary keys, each
     // carrying sign + auth subkeys (a primary/subkey hierarchy). All share one
