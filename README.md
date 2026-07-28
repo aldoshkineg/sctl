@@ -112,6 +112,21 @@ $ sctl umount mail
 
 ## Installation
 
+### From GitHub Releases
+
+Pre-built binaries are available at [https://github.com/aldoshkineg/sctl/releases](https://github.com/aldoshkineg/sctl/releases).
+
+```sh
+# Linux x86_64 (static musl build — no runtime dependencies
+# beyond gocryptfs and fusermount3)
+VERSION=v0.9.14
+curl -LJO https://github.com/aldoshkineg/sctl/releases/download/${VERSION}/sctl-${VERSION}-linux-x86_64-static.tar.gz
+tar xzf sctl-${VERSION}-linux-x86_64-static.tar.gz
+sudo install -m755 sctl-${VERSION}-linux-x86_64-static/sctl /usr/local/bin/
+```
+
+### From source
+
 ```sh
 make install
 # or manually:
