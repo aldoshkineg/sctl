@@ -12,7 +12,7 @@
   <img src="docs/assets/main.png" alt="sctl status" />
 </p>
 
-**sctl** makes encrypted directories feel transparent. Keep `~/.ssh`, `~/.gnupg`, password stores, shell environment files, mail archives, or any other sensitive data encrypted at rest while mounting them automatically when needed. Credentials are securely sealed to your machine's TPM (or an encrypted escrow), so one unlock is all it takes. Dependency resolution, idle unmounting, gpg-agent integration, and other quality-of-life features are built in.
+**sctl** makes encrypted directories feel transparent. Keep `~/.ssh`, `~/.gnupg`, password stores, shell environment files, mail archives, or any other sensitive data encrypted at rest while mounting them automatically when needed. Credentials are securely sealed to your machine's TPM (or an encrypted escrow), eliminating repeated password prompts. Dependency resolution, idle unmounting, gpg-agent integration, and other quality-of-life features are built in.
 
 ## Table of Contents
 
@@ -29,6 +29,8 @@
 - [Environment Variables](#environment-variables)
 - [License](#license)
 
+> Security should never make encrypted storage inconvenient.
+
 ## Why sctl?
 
 Managing multiple encrypted directories means mounting them by hand
@@ -37,14 +39,14 @@ and remembering every password. `sctl` eliminates that burden entirely.
 | | Without sctl | With sctl |
 |---|---|---|
 | Mount volumes | Manually, in order | `sctl mount mail` — deps resolve automatically |
-| Credentials | Remember each one | Stored once in TPM or escrow |
+| Enroll once | — | Enroll once, credentials retrieved automatically |
 | Dependency order | Figure it out yourself | Declared in config, enforced at runtime |
 | Unmount | Manual, fragile | Automatically unmounts dependencies that are no longer needed |
 | Idle cleanup | None | Auto-unmount after configurable timeout |
 | gpg-agent integration | Restart and re-enter passphrase | Preloaded from backend automatically |
 | Plaintext on disk | Often required | None — secrets are zeroized in memory |
 | Recovery if hardware fails | Manual backups | Encrypted escrow blob, any machine |
-| AI agents / shell env | Secrets exposed via plaintext `.env` and `zshenv` | Encrypted at rest, mounted only when needed, zeroized on unmount |
+| AI-assisted workflows | Secrets sometimes live in plaintext `.env` and `zshenv` files | Encrypted at rest, mounted on demand, zeroized when unmounted |
 
 ## Features
 
@@ -104,6 +106,12 @@ $ sctl mount mail
 
 $ neomutt
 
+$ sctl status
+
+mail   mounted  (idle in 25m)
+gpg    mounted
+pass   mounted
+
 $ sctl umount mail
 
 ✓ mail
@@ -118,8 +126,7 @@ $ sctl umount mail
 Pre-built binaries are available at [https://github.com/aldoshkineg/sctl/releases](https://github.com/aldoshkineg/sctl/releases).
 
 ```sh
-# Linux x86_64 (static musl build — no runtime dependencies
-# beyond gocryptfs and fusermount3)
+# Linux x86_64 (static musl build). Runtime requires only gocryptfs and fusermount3.
 VERSION=v0.9.14
 curl -LJO https://github.com/aldoshkineg/sctl/releases/download/${VERSION}/sctl-${VERSION}-linux-x86_64-static.tar.gz
 tar xzf sctl-${VERSION}-linux-x86_64-static.tar.gz
@@ -157,7 +164,7 @@ Requires `gocryptfs`, `fusermount3`, and `fuser` at runtime; `notify-send` (`--n
    sctl install
    ```
 
-4. **Mount everything** — credentials resolved automatically:
+4. **Mount everything** — dependencies and credentials resolved automatically:
 
    ```sh
    sctl mount all
@@ -232,7 +239,6 @@ For a deeper dive into the encryption model, threat analysis, and known limitati
 
 | Topic | Description |
 |-------|-------------|
-| [Architecture](docs/configuration.md#architecture) | DEK model, data flow, wrapping layers |
 | [Configuration](docs/configuration.md) | Full config reference, DEK model, first-run guide, gpg preloading |
 | [Security](docs/security.md) | Encryption architecture, threat model, backend design |
 | [GPG integration](docs/gpg.md) | Passphrase preloading, gpg-agent integration, preset modes |
