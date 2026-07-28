@@ -2,7 +2,6 @@ name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 env:
@@ -17,6 +16,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # gpg is required so the gpg-preset e2e test actually runs (it skips
+      # silently otherwise); the test manages its own agent lifecycle.
+      - name: Install gpg
+        run: sudo apt-get update && sudo apt-get install -y gnupg
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
