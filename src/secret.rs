@@ -278,6 +278,10 @@ mod tests {
 
     #[test]
     fn tpm_resolve() {
+        if !crate::tpm::available() {
+            eprintln!("skipping: no TPM device (/dev/tpmrm0)");
+            return;
+        }
         let dir = std::env::temp_dir().join("sctl-secret-tpm-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

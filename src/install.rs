@@ -489,6 +489,10 @@ mod tests {
 
     #[test]
     fn finalize_then_resolve_tpm() {
+        if !crate::tpm::available() {
+            eprintln!("skipping: no TPM device (/dev/tpmrm0)");
+            return;
+        }
         let cfg = base_cfg(SecretBackend::Tpm);
         let _ = std::fs::remove_dir_all(&cfg.state_dir);
         std::fs::create_dir_all(&cfg.state_dir).unwrap();

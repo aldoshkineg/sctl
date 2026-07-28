@@ -39,6 +39,13 @@ use zeroize::Zeroizing;
 /// from colliding. Safe because the DEK is never mutated on disk during a run.
 static DEK_CACHE: OnceLock<Mutex<HashMap<PathBuf, Zeroizing<Vec<u8>>>>> = OnceLock::new();
 
+/// Whether a TPM 2.0 device is present for sealing/unsealing. Unit tests that
+/// exercise the real TPM path skip themselves when this is false, so
+/// `cargo test` stays green on machines (and CI runners) without a TPM.
+pub fn available() -> bool {
+    Path::new("/dev/tpmrm0").exists() || Path::new("/dev/tpm0").exists()
+}
+
 /// Directory under `state_dir` holding the TPM blobs and the persisted primary
 /// context (`prim.ctx`).
 fn tpm_dir(state_dir: &Path) -> PathBuf {
@@ -280,6 +287,10 @@ mod tests {
 
     #[test]
     fn dek_seal_unseal_roundtrip() {
+        if !super::available() {
+            eprintln!("skipping: no TPM device (/dev/tpmrm0)");
+            return;
+        }
         let cfg = test_cfg();
         let _ = std::fs::remove_dir_all(tpm_dir(&cfg.state_dir));
         let dek = b"0123456789abcdef0123456789abcdef";
