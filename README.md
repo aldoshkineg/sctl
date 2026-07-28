@@ -12,7 +12,7 @@
   <img src="docs/assets/main.png" alt="sctl status" />
 </p>
 
-**sctl** makes encrypted directories feel transparent. Keep `~/.ssh`, `~/.gnupg`, password stores, mail archives, or any other directory encrypted at rest while mounting them automatically when needed.
+**sctl** makes encrypted directories feel transparent. Keep `~/.ssh`, `~/.gnupg`, password stores, `.env` (zsh), mail archives, or any other directory encrypted at rest while mounting them automatically when needed. Credentials are sealed to the machine's TPM — a single passphrase unlocks everything at mount time. In an era when AI agents operate with access to your shell environment, protecting these secrets is more important than ever.
 
 ## Table of Contents
 
@@ -44,6 +44,7 @@ and remembering every password. `sctl` eliminates that burden entirely.
 | gpg-agent integration | Restart and re-enter passphrase | Preloaded from backend automatically |
 | Plaintext on disk | Often required | None — secrets are zeroized in memory |
 | Recovery if hardware fails | Manual backups | Encrypted escrow blob, any machine |
+| AI agents / shell env | Secrets exposed via plaintext `.env` and `zshenv` | Encrypted at rest, mounted only when needed, zeroized on unmount |
 
 ## Features
 
