@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/logo.png" alt="sctl logo" width="120" />
-</p>
-
 # sctl
 
 [![CI](https://github.com/aldoshkineg/sctl/actions/workflows/ci.yml/badge.svg)](https://github.com/aldoshkineg/sctl/actions/workflows/ci.yml)
@@ -9,7 +5,7 @@
 [![rust](https://img.shields.io/badge/rust-1.89%2B-orange)](https://www.rust-lang.org)
 
 <p align="center">
-  <img src="docs/assets/main.png" alt="sctl status" />
+  <img src="docs/assets/main.png" alt="sctl status" width="65%" />
 </p>
 
 **sctl** makes encrypted directories feel transparent. Keep `~/.ssh`, `~/.gnupg`, password stores, shell environment files, mail archives, or any other sensitive data encrypted at rest while mounting them automatically when needed. Credentials are securely sealed to your machine's TPM (or an encrypted escrow), eliminating repeated password prompts. Dependency resolution, idle unmounting, gpg-agent integration, and other quality-of-life features are built in.
