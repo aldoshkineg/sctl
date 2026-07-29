@@ -2,6 +2,13 @@
 
 Project conventions and workflow rules for `sctl` (Rust / clap CLI).
 
+## Hard rules (never violate)
+
+- **Never add `Co-Authored-By: opencode <opencode@anomalyco.com>` (or any
+  opencode/agent trailer) to commit messages.** Do not append it via the
+  `git commit` command, heredocs, or templates. If such a trailer is ever
+  present, amend it out of history before pushing.
+
 ## Commands (all via the Makefile)
 
 Never run `cargo` / `install` by hand — every build/verify/install step goes
