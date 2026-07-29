@@ -10,6 +10,10 @@
 
 **sctl** makes encrypted directories feel transparent. Keep `~/.ssh`, `~/.gnupg`, password stores, shell environment files, mail archives, or any other sensitive data encrypted at rest while mounting them automatically when needed. Credentials are securely sealed to your machine's TPM (or an encrypted escrow), eliminating repeated password prompts. Dependency resolution, idle unmounting, gpg-agent integration, and other quality-of-life features are built in.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="sctl demo" width="80%" />
+</p>
+
 ## Table of Contents
 
 - [Why sctl?](#why-sctl)
