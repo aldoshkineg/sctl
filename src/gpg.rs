@@ -96,79 +96,101 @@ pub fn preset_all(cfg: &Config) -> Result<()> {
 /// plus every subkey's keygrip (they share the primary key's passphrase, which
 /// is what we preset). `primary_uid` is the key's first user-id
 /// (`Name <email>`), used for human-readable prompts during `install`.
+fn ensure_agent(home: &Path) {
+    // Spawn (if not already running) a `gpg-agent` dedicated to `home` and point
+    // `GNUPGHOME` at it, so subsequent `gpg` calls for that home talk to an agent
+    // that actually serves it. Best-effort: failures are ignored because the
+    // caller still works if the agent is already reachable another way.
+    // `gpgconf --launch` honors GNUPGHOME, which we set to `home` so the spawned
+    // agent actually serves this (non-default) homedir.
+    let _ = Command::new("gpgconf")
+        .env("GNUPGHOME", home)
+        .arg("--launch")
+        .arg("gpg-agent")
+        .output();
+}
+
 pub fn keys_with_keygrips(home: &Path) -> Result<Vec<(String, String, Vec<String>)>> {
+    // Discover secret keys WITHOUT consulting the gpg-agent. On runners that
+    // ship a pre-started (default) gpg-agent, `gpg --list-secret-keys` asks that
+    // agent which refuses to serve a custom homedir and reports no secret keys.
+    // We instead read the *public* key listing (no agent needed) for the
+    // primary/subkey structure and keygrips, then keep only the keygrips whose
+    // secret material actually exists on disk in this home
+    // (`private-keys-v1.d/<keygrip>.key`). This works on any machine/runner
+    // regardless of a pre-existing agent.
     let out = Command::new("gpg")
         .arg("--homedir")
         .arg(home)
         .arg("--batch")
         .arg("--with-colons")
         .arg("--with-keygrip")
-        .arg("--list-secret-keys")
+        .arg("--list-keys")
         .output()
-        .context("running gpg --list-secret-keys")?;
+        .context("running gpg --list-keys")?;
     if !out.status.success() {
-        bail!("gpg --list-secret-keys failed for {}", home.display());
+        bail!("gpg --list-keys failed for {}", home.display());
     }
     let text = String::from_utf8_lossy(&out.stdout);
 
-    let mut keys: Vec<(String, String, Vec<String>)> = Vec::new();
-    let mut cur: Option<(String, Option<String>, Vec<String>)> = None;
-    let mut pending_uid: Option<String> = None;
+    let private_dir = home.join("private-keys-v1.d");
+    let has_secret = |g: &str| private_dir.join(format!("{g}.key")).exists();
+
+    struct Prim {
+        fpr: String,
+        uid: String,
+        grips: Vec<String>,
+    }
+    let mut prims: Vec<Prim> = Vec::new();
+    let mut cur: Option<Prim> = None;
     let mut in_primary = false;
-    let mut got_primary_fpr = false;
+    let mut cur_fpr: Option<String> = None;
 
     for line in text.lines() {
-        if line.starts_with("sec:") {
-            if let Some(c) = cur.take() {
-                keys.push(to_triple(c));
+        if line.starts_with("pub:") {
+            if let Some(p) = cur.take() {
+                prims.push(p);
             }
             in_primary = true;
-            got_primary_fpr = false;
-            cur = None;
-            pending_uid = None;
-        } else if line.starts_with("ssb:") {
-            // Subkey block: its grips belong to the current primary key.
+            cur = Some(Prim {
+                fpr: String::new(),
+                uid: String::new(),
+                grips: Vec::new(),
+            });
+        } else if line.starts_with("sub:") {
             in_primary = false;
         } else if line.starts_with("uid:") && in_primary {
-            let Some(u) = line.split(':').nth(9) else {
-                continue;
-            };
-            if u.is_empty() {
-                continue;
+            if let Some(u) = line.split(':').nth(9)
+                && !u.is_empty()
+                && let Some(p) = cur.as_mut()
+                && p.uid.is_empty()
+            {
+                p.uid = u.to_string();
             }
-            match cur.as_mut() {
-                Some((_, uid @ None, _)) => *uid = Some(u.to_string()),
-                Some(_) => {}
-                None => pending_uid = Some(u.to_string()),
+        } else if line.starts_with("fpr:") {
+            cur_fpr = line.split(':').nth(9).map(|s| s.to_string());
+        } else if line.starts_with("grp:")
+            && let (Some(fpr), Some(g)) = (cur_fpr.take(), line.split(':').nth(9))
+            && !g.is_empty()
+            && has_secret(g)
+            && let Some(p) = cur.as_mut()
+        {
+            if in_primary && p.fpr.is_empty() {
+                p.fpr = fpr;
             }
-        } else if line.starts_with("fpr:") && in_primary && !got_primary_fpr {
-            if let Some(f) = line.split(':').nth(9) {
-                let uid = pending_uid.take();
-                cur = Some((f.to_string(), uid, Vec::new()));
-                got_primary_fpr = true;
-            }
-        } else if line.starts_with("grp:") {
-            let Some((_, _, grips)) = cur.as_mut() else {
-                continue;
-            };
-            let Some(g) = line.split(':').nth(9) else {
-                continue;
-            };
-            if !g.is_empty() && !grips.iter().any(|x| x == g) {
-                grips.push(g.to_string());
-            }
+            p.grips.push(g.to_string());
         }
     }
-    if let Some(c) = cur.take() {
-        keys.push(to_triple(c));
+    if let Some(p) = cur.take() {
+        prims.push(p);
     }
-    Ok(keys)
-}
 
-/// Finalize a `(fpr, Option<uid>, grips)` accumulator into a `(fpr, uid, grips)`
-/// triple, defaulting a missing uid to an empty string.
-fn to_triple(c: (String, Option<String>, Vec<String>)) -> (String, String, Vec<String>) {
-    (c.0, c.1.unwrap_or_default(), c.2)
+    let keys: Vec<(String, String, Vec<String>)> = prims
+        .into_iter()
+        .filter(|p| !p.grips.is_empty())
+        .map(|p| (p.fpr, p.uid, p.grips))
+        .collect();
+    Ok(keys)
 }
 
 /// Verify a gpg key passphrase for real: decrypt the secret key with the
@@ -182,9 +204,11 @@ pub fn verify_passphrase(home: &Path, fpr: &str, _keygrip: &str, passphrase: &[u
     // Write the candidate passphrase to a 0600 temp file (never exposed via ps).
     let passfile =
         crate::passfile::from_bytes(passphrase).context("writing gpg passphrase to temp file")?;
+    ensure_agent(home);
     let out = Command::new("gpg")
         .arg("--homedir")
         .arg(home)
+        .env("GNUPGHOME", home)
         .arg("--batch")
         .arg("--yes")
         .arg("--pinentry-mode=loopback")
